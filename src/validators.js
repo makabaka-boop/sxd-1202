@@ -99,6 +99,7 @@ const schemas = {
     batch_id: Joi.number().integer().min(1).required(),
     source_type: Joi.string().required().valid(...REWORK_SOURCE_TYPES),
     source_id: Joi.number().integer().min(1).allow(null),
+    source_operation_id: Joi.number().integer().min(1).allow(null),
     rework_reason: Joi.string().required().trim().min(1),
     disposal_plan: Joi.string().required().trim().min(1),
     responsible_team: Joi.string().required().trim().min(1),
@@ -119,7 +120,8 @@ const schemas = {
     process_remark: Joi.string().allow('', null),
     handler: Joi.string().trim().allow('', null),
     source_type: Joi.string().valid(...REWORK_SOURCE_TYPES),
-    source_id: Joi.number().integer().min(1).allow(null)
+    source_id: Joi.number().integer().min(1).allow(null),
+    source_operation_id: Joi.number().integer().min(1).allow(null)
   }),
 
   closeRework: Joi.object({
@@ -458,15 +460,21 @@ function checkReworkOverdue(rework) {
 function checkReworkClosed(id) {
   const rework = reworkRepo.getById(id);
   if (!rework) {
-    return { closed: false, message: '返工处置单不存在' };
+    return {
+      exists: false,
+      closed: false,
+      message: `返工处置单(ID:${id})不存在，请确认ID是否正确`
+    };
   }
   if (rework.status === 'closed') {
     return {
+      exists: true,
       closed: true,
-      message: '已关闭的返工处置单不可继续追加处理记录'
+      rework,
+      message: `返工处置单(ID:${id})已关闭，不可继续追加处理记录`
     };
   }
-  return { closed: false, rework };
+  return { exists: true, closed: false, rework };
 }
 
 module.exports = {

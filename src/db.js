@@ -88,6 +88,7 @@ function createTables() {
       batch_id INTEGER NOT NULL,
       source_type TEXT NOT NULL,
       source_id INTEGER,
+      source_operation_id INTEGER,
       rework_reason TEXT NOT NULL,
       disposal_plan TEXT NOT NULL,
       responsible_team TEXT NOT NULL,
@@ -100,7 +101,8 @@ function createTables() {
       updated_at TEXT NOT NULL,
       closed_at TEXT,
       FOREIGN KEY (batch_id) REFERENCES batches(id) ON DELETE CASCADE,
-      FOREIGN KEY (source_id) REFERENCES exception_orders(id) ON DELETE SET NULL
+      FOREIGN KEY (source_id) REFERENCES exception_orders(id) ON DELETE SET NULL,
+      FOREIGN KEY (source_operation_id) REFERENCES operations(id) ON DELETE SET NULL
     );
   `);
 }
@@ -110,6 +112,12 @@ function migrateSchema() {
   const hasReworkId = opsPragma.some(c => c.name === 'rework_order_id');
   if (!hasReworkId) {
     db.exec(`ALTER TABLE operations ADD COLUMN rework_order_id INTEGER REFERENCES rework_orders(id) ON DELETE SET NULL`);
+  }
+
+  const rwPragma = db.prepare("PRAGMA table_info(rework_orders)").all();
+  const hasSourceOpId = rwPragma.some(c => c.name === 'source_operation_id');
+  if (!hasSourceOpId) {
+    db.exec(`ALTER TABLE rework_orders ADD COLUMN source_operation_id INTEGER REFERENCES operations(id) ON DELETE SET NULL`);
   }
 }
 

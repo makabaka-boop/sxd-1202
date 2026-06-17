@@ -573,15 +573,16 @@ const reworkRepo = {
     const now = new Date().toISOString();
     const stmt = db.prepare(`
       INSERT INTO rework_orders
-      (batch_id, source_type, source_id, rework_reason, disposal_plan, responsible_team,
+      (batch_id, source_type, source_id, source_operation_id, rework_reason, disposal_plan, responsible_team,
        planned_completion_at, actual_completion_at, status, process_remark, handler,
        created_at, updated_at, closed_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const result = stmt.run(
       data.batch_id,
       data.source_type,
       data.source_id ?? null,
+      data.source_operation_id ?? null,
       data.rework_reason,
       data.disposal_plan,
       data.responsible_team,
@@ -607,7 +608,8 @@ const reworkRepo = {
     const allowed = [
       'rework_reason', 'disposal_plan', 'responsible_team',
       'planned_completion_at', 'actual_completion_at', 'status',
-      'process_remark', 'handler', 'source_type', 'source_id'
+      'process_remark', 'handler', 'source_type', 'source_id',
+      'source_operation_id'
     ];
     for (const key of allowed) {
       if (data[key] !== undefined) {
@@ -690,9 +692,13 @@ const reworkRepo = {
   getById(id) {
     return db.prepare(`
       SELECT ro.*, b.cloth_no, b.vat_no, b.material, b.shade_target, b.status AS batch_status,
-             b.responsible_team AS batch_responsible_team
+             b.responsible_team AS batch_responsible_team,
+             op.op_type AS source_op_type, op.op_time AS source_op_time,
+             op.operator AS source_operator, op.color_diff_desc AS source_color_diff,
+             op.redye_suggestion AS source_redye_suggestion
       FROM rework_orders ro
       LEFT JOIN batches b ON b.id = ro.batch_id
+      LEFT JOIN operations op ON op.id = ro.source_operation_id
       WHERE ro.id = ?
     `).get(id);
   },
@@ -700,9 +706,12 @@ const reworkRepo = {
   getByBatch(batchId, includeClosed = false) {
     const placeholders = REWORK_OPEN_STATUSES.map(() => '?').join(',');
     let sql = `
-      SELECT ro.*, b.cloth_no, b.vat_no, b.material, b.shade_target, b.status AS batch_status
+      SELECT ro.*, b.cloth_no, b.vat_no, b.material, b.shade_target, b.status AS batch_status,
+             op.op_type AS source_op_type, op.op_time AS source_op_time,
+             op.operator AS source_operator
       FROM rework_orders ro
       LEFT JOIN batches b ON b.id = ro.batch_id
+      LEFT JOIN operations op ON op.id = ro.source_operation_id
       WHERE ro.batch_id = ?
     `;
     const params = [batchId];
@@ -716,9 +725,12 @@ const reworkRepo = {
 
   getByException(exceptionId) {
     return db.prepare(`
-      SELECT ro.*, b.cloth_no, b.vat_no, b.material, b.shade_target, b.status AS batch_status
+      SELECT ro.*, b.cloth_no, b.vat_no, b.material, b.shade_target, b.status AS batch_status,
+             op.op_type AS source_op_type, op.op_time AS source_op_time,
+             op.operator AS source_operator
       FROM rework_orders ro
       LEFT JOIN batches b ON b.id = ro.batch_id
+      LEFT JOIN operations op ON op.id = ro.source_operation_id
       WHERE ro.source_type = 'exception' AND ro.source_id = ?
       ORDER BY ro.created_at DESC
     `).all(exceptionId);
@@ -727,7 +739,9 @@ const reworkRepo = {
   getOpenByBatch(batchId) {
     const placeholders = REWORK_OPEN_STATUSES.map(() => '?').join(',');
     return db.prepare(`
-      SELECT * FROM rework_orders
+      SELECT ro.*, op.op_type AS source_op_type
+      FROM rework_orders ro
+      LEFT JOIN operations op ON op.id = ro.source_operation_id
       WHERE batch_id = ? AND status IN (${placeholders})
       ORDER BY created_at DESC LIMIT 1
     `).get(batchId, ...REWORK_OPEN_STATUSES);
@@ -748,9 +762,12 @@ const reworkRepo = {
     if (filters.material) { where.push('b.material = ?'); params.push(filters.material); }
 
     let sql = `
-      SELECT ro.*, b.cloth_no, b.vat_no, b.material, b.shade_target, b.status AS batch_status
+      SELECT ro.*, b.cloth_no, b.vat_no, b.material, b.shade_target, b.status AS batch_status,
+             op.op_type AS source_op_type, op.op_time AS source_op_time,
+             op.operator AS source_operator
       FROM rework_orders ro
       LEFT JOIN batches b ON b.id = ro.batch_id
+      LEFT JOIN operations op ON op.id = ro.source_operation_id
     `;
     if (where.length) sql += ' WHERE ' + where.join(' AND ');
     sql += ' ORDER BY ro.created_at DESC';
@@ -802,9 +819,12 @@ const reworkRepo = {
 
     const openOrdersWithBatches = db.prepare(`
       SELECT ro.*, b.cloth_no, b.vat_no, b.material, b.shade_target, b.status AS batch_status,
+             op.op_type AS source_op_type, op.op_time AS source_op_time,
+             op.operator AS source_operator,
              CASE WHEN ro.planned_completion_at < ? THEN 1 ELSE 0 END AS is_overdue
       FROM rework_orders ro
       LEFT JOIN batches b ON b.id = ro.batch_id
+      LEFT JOIN operations op ON op.id = ro.source_operation_id
       WHERE ro.status IN (${openPlaceholders})
       ORDER BY ro.created_at DESC
     `).all(now, ...REWORK_OPEN_STATUSES);
@@ -837,9 +857,12 @@ const reworkRepo = {
     const now = new Date().toISOString();
     const placeholders = REWORK_OPEN_STATUSES.map(() => '?').join(',');
     return db.prepare(`
-      SELECT ro.*, b.cloth_no, b.vat_no, b.material, b.shade_target, b.status AS batch_status
+      SELECT ro.*, b.cloth_no, b.vat_no, b.material, b.shade_target, b.status AS batch_status,
+             op.op_type AS source_op_type, op.op_time AS source_op_time,
+             op.operator AS source_operator
       FROM rework_orders ro
       LEFT JOIN batches b ON b.id = ro.batch_id
+      LEFT JOIN operations op ON op.id = ro.source_operation_id
       WHERE ro.status IN (${placeholders})
       AND ro.planned_completion_at IS NOT NULL
       AND ro.planned_completion_at < ?

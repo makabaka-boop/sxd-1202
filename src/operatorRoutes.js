@@ -30,11 +30,14 @@ router.post('/batches/:id/operations', validate(schemas.operation), (req, res) =
 
     if (data.rework_order_id) {
       const reworkCheck = checkReworkClosed(data.rework_order_id);
+      if (!reworkCheck.exists) {
+        throw new Error(reworkCheck.message);
+      }
       if (reworkCheck.closed) {
         throw new Error(reworkCheck.message);
       }
-      if (reworkCheck.rework && reworkCheck.rework.batch_id !== batchId) {
-        throw new Error('返工处置单与批次不匹配');
+      if (reworkCheck.rework.batch_id !== batchId) {
+        throw new Error(`返工处置单(ID:${data.rework_order_id})属于批次(ID:${reworkCheck.rework.batch_id})，与当前批次不匹配`);
       }
     }
 
@@ -441,6 +444,16 @@ router.post('/batches/:id/reworks', validate(schemas.createRework), (req, res) =
       }
       if (exCheck.exception.batch_id !== batchId) {
         throw new Error('关联的异常处置单与批次不匹配');
+      }
+    }
+
+    if (data.source_operation_id) {
+      const srcOp = operationRepo.getById(data.source_operation_id);
+      if (!srcOp) {
+        throw new Error(`来源操作记录(ID:${data.source_operation_id})不存在`);
+      }
+      if (srcOp.batch_id !== batchId) {
+        throw new Error(`来源操作记录(ID:${data.source_operation_id})与批次不匹配`);
       }
     }
 

@@ -450,6 +450,16 @@ router.post('/reworks', validate(schemas.createRework), (req, res) => {
       }
     }
 
+    if (data.source_operation_id) {
+      const srcOp = operationRepo.getById(data.source_operation_id);
+      if (!srcOp) {
+        throw new Error(`来源操作记录(ID:${data.source_operation_id})不存在`);
+      }
+      if (srcOp.batch_id !== data.batch_id) {
+        throw new Error(`来源操作记录(ID:${data.source_operation_id})与批次不匹配`);
+      }
+    }
+
     return reworkRepo.create(data);
   });
 
@@ -487,6 +497,18 @@ router.put('/reworks/:id', validate(schemas.updateRework), (req, res) => {
       }
       if (exCheck.exception.batch_id !== existing.batch_id) {
         throw new Error('关联的异常处置单与批次不匹配');
+      }
+    }
+
+    if (data.source_operation_id !== undefined && data.source_operation_id !== existing.source_operation_id) {
+      if (data.source_operation_id) {
+        const srcOp = operationRepo.getById(data.source_operation_id);
+        if (!srcOp) {
+          throw new Error(`来源操作记录(ID:${data.source_operation_id})不存在`);
+        }
+        if (srcOp.batch_id !== existing.batch_id) {
+          throw new Error(`来源操作记录(ID:${data.source_operation_id})与批次不匹配`);
+        }
       }
     }
 
