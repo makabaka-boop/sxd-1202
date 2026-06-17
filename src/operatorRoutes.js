@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('./db');
-const { batchRepo, operationRepo, vatRepo, vatOccupancyRepo, exceptionRepo } = require('./repositories');
+const { batchRepo, operationRepo, vatRepo, vatOccupancyRepo, exceptionRepo, reworkRepo } = require('./repositories');
 const {
   schemas,
   validate,
@@ -12,7 +12,10 @@ const {
   checkVatConflict,
   computeNextRecheck,
   checkExceptionExists,
-  autoGenerateExceptionFromWarning
+  autoGenerateExceptionFromWarning,
+  checkReworkExists,
+  checkReworkClosed,
+  checkBatchExistsForRework
 } = require('./validators');
 
 router.post('/batches/:id/operations', validate(schemas.operation), (req, res) => {
@@ -24,6 +27,16 @@ router.post('/batches/:id/operations', validate(schemas.operation), (req, res) =
     }
 
     const data = req.validated;
+
+    if (data.rework_order_id) {
+      const reworkCheck = checkReworkClosed(data.rework_order_id);
+      if (reworkCheck.closed) {
+        throw new Error(reworkCheck.message);
+      }
+      if (reworkCheck.rework && reworkCheck.rework.batch_id !== batchId) {
+        throw new Error('返工处置单与批次不匹配');
+      }
+    }
 
     const transition = checkStatusTransition(batch.status, null, data.op_type);
     if (!transition.valid) {
@@ -43,6 +56,10 @@ router.post('/batches/:id/operations', validate(schemas.operation), (req, res) =
       batch_id: batchId
     };
     const operation = operationRepo.create(operationData);
+
+    if (data.rework_order_id) {
+      reworkRepo.advanceStatus(data.rework_order_id, data.op_type);
+    }
 
     const updates = {};
     let newDipCount = batch.dip_count;
@@ -96,7 +113,8 @@ router.post('/batches/:id/operations', validate(schemas.operation), (req, res) =
       vatRepo.setFree(updatedBatch.vat_no);
     }
 
-    return { operation, batch: updatedBatch };
+    const rework = data.rework_order_id ? reworkRepo.getById(data.rework_order_id) : null;
+    return { operation, batch: updatedBatch, rework };
   });
 
   try {
@@ -158,6 +176,16 @@ function handleOperation(req, res) {
       throw new Error('参数校验失败: ' + error.details.map(d => d.message).join('; '));
     }
 
+    if (value.rework_order_id) {
+      const reworkCheck = checkReworkClosed(value.rework_order_id);
+      if (reworkCheck.closed) {
+        throw new Error(reworkCheck.message);
+      }
+      if (reworkCheck.rework && reworkCheck.rework.batch_id !== batchId) {
+        throw new Error('返工处置单与批次不匹配');
+      }
+    }
+
     const transition = checkStatusTransition(batch.status, null, opType);
     if (!transition.valid) {
       throw new Error(transition.message);
@@ -176,6 +204,10 @@ function handleOperation(req, res) {
       batch_id: batchId
     };
     const operation = operationRepo.create(operationData);
+
+    if (value.rework_order_id) {
+      reworkRepo.advanceStatus(value.rework_order_id, opType);
+    }
 
     const updates = {};
     let newDipCount = batch.dip_count;
@@ -228,7 +260,8 @@ function handleOperation(req, res) {
       vatRepo.setFree(updatedBatch.vat_no);
     }
 
-    return { operation, batch: updatedBatch };
+    const rework = value.rework_order_id ? reworkRepo.getById(value.rework_order_id) : null;
+    return { operation, batch: updatedBatch, rework };
   });
 
   try {
@@ -353,6 +386,122 @@ router.post('/exceptions/:id/remark', validate(schemas.appendExceptionRemark), (
   try {
     const exception = tx();
     res.json(exception);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+router.get('/reworks/:id', (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const rework = reworkRepo.getById(id);
+    if (!rework) {
+      return res.status(404).json({ error: '返工处置单不存在' });
+    }
+    const operations = operationRepo.listByReworkOrder(id);
+    res.json({ ...rework, operations });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/batches/:id/reworks', (req, res) => {
+  try {
+    const batchId = parseInt(req.params.id);
+    const batch = batchRepo.getById(batchId);
+    if (!batch) {
+      return res.status(404).json({ error: '批次不存在' });
+    }
+    const includeClosed = req.query.include_closed === 'true';
+    const reworks = reworkRepo.getByBatch(batchId, includeClosed);
+    res.json(reworks);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/batches/:id/reworks', validate(schemas.createRework), (req, res) => {
+  const tx = db.transaction(() => {
+    const batchId = parseInt(req.params.id);
+    const data = req.validated;
+
+    const batchCheck = checkBatchExistsForRework(batchId);
+    if (!batchCheck.exists) {
+      throw new Error(batchCheck.message);
+    }
+
+    if (data.batch_id !== batchId) {
+      throw new Error('请求路径中的批次ID与请求体不一致');
+    }
+
+    if (data.source_type === 'exception' && data.source_id) {
+      const exCheck = checkExceptionExists(data.source_id);
+      if (!exCheck.exists) {
+        throw new Error('关联的异常处置单不存在');
+      }
+      if (exCheck.exception.batch_id !== batchId) {
+        throw new Error('关联的异常处置单与批次不匹配');
+      }
+    }
+
+    return reworkRepo.create(data);
+  });
+
+  try {
+    const rework = tx();
+    res.status(201).json(rework);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+router.post('/exceptions/:id/reworks', (req, res) => {
+  const tx = db.transaction(() => {
+    const exceptionId = parseInt(req.params.id);
+
+    const exCheck = checkExceptionExists(exceptionId);
+    if (!exCheck.exists) {
+      throw new Error(exCheck.message);
+    }
+
+    const batchId = exCheck.exception.batch_id;
+
+    req.body.source_type = 'exception';
+    req.body.source_id = exceptionId;
+    req.body.batch_id = batchId;
+
+    const { error, value } = schemas.createRework.validate(req.body, { abortEarly: false, convert: true });
+    if (error) {
+      throw new Error('参数校验失败: ' + error.details.map(d => d.message).join('; '));
+    }
+
+    return reworkRepo.create(value);
+  });
+
+  try {
+    const rework = tx();
+    res.status(201).json(rework);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+router.post('/reworks/:id/remark', validate(schemas.appendReworkRemark), (req, res) => {
+  const tx = db.transaction(() => {
+    const id = parseInt(req.params.id);
+    const data = req.validated;
+
+    const closedCheck = checkReworkClosed(id);
+    if (closedCheck.closed) {
+      throw new Error(closedCheck.message);
+    }
+
+    return reworkRepo.appendRemark(id, data.process_remark);
+  });
+
+  try {
+    const rework = tx();
+    res.json(rework);
   } catch (err) {
     res.status(400).json({ error: err.message });
   }

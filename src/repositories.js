@@ -180,8 +180,8 @@ const operationRepo = {
     const now = nullish(data.op_time, new Date().toISOString());
     const stmt = db.prepare(`
       INSERT INTO operations
-      (batch_id, op_type, op_time, operator, color_diff_desc, edge_halo_level, redye_suggestion, temperature, duration_minutes, remark)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (batch_id, op_type, op_time, operator, color_diff_desc, edge_halo_level, redye_suggestion, temperature, duration_minutes, remark, rework_order_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const result = stmt.run(
       data.batch_id,
@@ -193,7 +193,8 @@ const operationRepo = {
       nullish(data.redye_suggestion),
       data.temperature ?? null,
       data.duration_minutes ?? null,
-      nullish(data.remark)
+      nullish(data.remark),
+      data.rework_order_id ?? null
     );
     return this.getById(result.lastInsertRowid);
   },
@@ -203,7 +204,21 @@ const operationRepo = {
   },
 
   listByBatch(batch_id) {
-    return db.prepare('SELECT * FROM operations WHERE batch_id = ? ORDER BY op_time ASC, id ASC').all(batch_id);
+    return db.prepare(`
+      SELECT o.*, ro.status AS rework_status, ro.rework_reason
+      FROM operations o
+      LEFT JOIN rework_orders ro ON ro.id = o.rework_order_id
+      WHERE o.batch_id = ?
+      ORDER BY o.op_time ASC, o.id ASC
+    `).all(batch_id);
+  },
+
+  listByReworkOrder(rework_order_id) {
+    return db.prepare(`
+      SELECT * FROM operations
+      WHERE rework_order_id = ?
+      ORDER BY op_time ASC, id ASC
+    `).all(rework_order_id);
   },
 
   getLastColorRecord(batch_id) {
@@ -365,6 +380,10 @@ const materialRepo = {
 
 const EXCEPTION_TYPES = ['recheck_overdue', 'color_deviation', 'redye_missing_color'];
 const EXCEPTION_STATUSES = ['pending', 'processing', 'closed'];
+
+const REWORK_SOURCE_TYPES = ['recheck', 'color_diff', 'exception', 'manual'];
+const REWORK_STATUSES = ['pending', 'processing', 'completed', 'closed'];
+const REWORK_OPEN_STATUSES = ['pending', 'processing'];
 
 const exceptionRepo = {
   create(data) {
@@ -549,6 +568,286 @@ const exceptionRepo = {
   }
 };
 
+const reworkRepo = {
+  create(data) {
+    const now = new Date().toISOString();
+    const stmt = db.prepare(`
+      INSERT INTO rework_orders
+      (batch_id, source_type, source_id, rework_reason, disposal_plan, responsible_team,
+       planned_completion_at, actual_completion_at, status, process_remark, handler,
+       created_at, updated_at, closed_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const result = stmt.run(
+      data.batch_id,
+      data.source_type,
+      data.source_id ?? null,
+      data.rework_reason,
+      data.disposal_plan,
+      data.responsible_team,
+      data.planned_completion_at,
+      data.actual_completion_at ?? null,
+      nullish(data.status, 'pending'),
+      nullish(data.process_remark),
+      nullish(data.handler),
+      now,
+      now,
+      null
+    );
+    return this.getById(result.lastInsertRowid);
+  },
+
+  update(id, data) {
+    const existing = this.getById(id);
+    if (!existing) return null;
+
+    const now = new Date().toISOString();
+    const fields = [];
+    const values = [];
+    const allowed = [
+      'rework_reason', 'disposal_plan', 'responsible_team',
+      'planned_completion_at', 'actual_completion_at', 'status',
+      'process_remark', 'handler', 'source_type', 'source_id'
+    ];
+    for (const key of allowed) {
+      if (data[key] !== undefined) {
+        fields.push(`${key} = ?`);
+        values.push(data[key]);
+      }
+    }
+
+    if (data.status !== undefined && data.status !== existing.status) {
+      if (data.status === 'closed') {
+        fields.push('closed_at = ?');
+        values.push(now);
+      } else if (existing.status === 'closed' && data.status !== 'closed') {
+        fields.push('closed_at = ?');
+        values.push(null);
+      }
+      if (data.status === 'completed' && !existing.actual_completion_at) {
+        fields.push('actual_completion_at = ?');
+        values.push(now);
+      }
+    }
+
+    if (values.length === 0) return existing;
+    fields.push('updated_at = ?');
+    values.push(now, id);
+    const stmt = db.prepare(`UPDATE rework_orders SET ${fields.join(', ')} WHERE id = ?`);
+    stmt.run(...values);
+    return this.getById(id);
+  },
+
+  close(id, process_remark = null) {
+    const now = new Date().toISOString();
+    const fields = ['status = ?', 'closed_at = ?', 'updated_at = ?'];
+    const values = ['closed', now, now];
+    if (process_remark !== null && process_remark !== undefined) {
+      fields.push('process_remark = ?');
+      const existing = this.getById(id);
+      const combined = existing && existing.process_remark
+        ? `${existing.process_remark}\n${process_remark}`
+        : process_remark;
+      values.push(combined);
+    }
+    values.push(id);
+    const stmt = db.prepare(`UPDATE rework_orders SET ${fields.join(', ')} WHERE id = ?`);
+    stmt.run(...values);
+    return this.getById(id);
+  },
+
+  advanceStatus(id, operationType) {
+    const existing = this.getById(id);
+    if (!existing) return null;
+    if (existing.status === 'closed') return existing;
+
+    const now = new Date().toISOString();
+    let newStatus = existing.status;
+
+    if (existing.status === 'pending') {
+      newStatus = 'processing';
+    }
+
+    if (['复验', '固色'].includes(operationType) && existing.status === 'processing') {
+      newStatus = 'completed';
+    }
+
+    if (newStatus !== existing.status) {
+      return this.update(id, { status: newStatus });
+    }
+    return existing;
+  },
+
+  appendRemark(id, remark) {
+    const existing = this.getById(id);
+    if (!existing) return null;
+    const combined = existing.process_remark
+      ? `${existing.process_remark}\n${remark}`
+      : remark;
+    return this.update(id, { process_remark: combined });
+  },
+
+  getById(id) {
+    return db.prepare(`
+      SELECT ro.*, b.cloth_no, b.vat_no, b.material, b.shade_target, b.status AS batch_status,
+             b.responsible_team AS batch_responsible_team
+      FROM rework_orders ro
+      LEFT JOIN batches b ON b.id = ro.batch_id
+      WHERE ro.id = ?
+    `).get(id);
+  },
+
+  getByBatch(batchId, includeClosed = false) {
+    const placeholders = REWORK_OPEN_STATUSES.map(() => '?').join(',');
+    let sql = `
+      SELECT ro.*, b.cloth_no, b.vat_no, b.material, b.shade_target, b.status AS batch_status
+      FROM rework_orders ro
+      LEFT JOIN batches b ON b.id = ro.batch_id
+      WHERE ro.batch_id = ?
+    `;
+    const params = [batchId];
+    if (!includeClosed) {
+      sql += ` AND ro.status IN (${placeholders})`;
+      params.push(...REWORK_OPEN_STATUSES);
+    }
+    sql += ' ORDER BY ro.created_at DESC';
+    return db.prepare(sql).all(...params);
+  },
+
+  getByException(exceptionId) {
+    return db.prepare(`
+      SELECT ro.*, b.cloth_no, b.vat_no, b.material, b.shade_target, b.status AS batch_status
+      FROM rework_orders ro
+      LEFT JOIN batches b ON b.id = ro.batch_id
+      WHERE ro.source_type = 'exception' AND ro.source_id = ?
+      ORDER BY ro.created_at DESC
+    `).all(exceptionId);
+  },
+
+  getOpenByBatch(batchId) {
+    const placeholders = REWORK_OPEN_STATUSES.map(() => '?').join(',');
+    return db.prepare(`
+      SELECT * FROM rework_orders
+      WHERE batch_id = ? AND status IN (${placeholders})
+      ORDER BY created_at DESC LIMIT 1
+    `).get(batchId, ...REWORK_OPEN_STATUSES);
+  },
+
+  list(filters = {}) {
+    const where = [];
+    const params = [];
+
+    if (filters.batch_id) { where.push('ro.batch_id = ?'); params.push(filters.batch_id); }
+    if (filters.status) { where.push('ro.status = ?'); params.push(filters.status); }
+    if (filters.responsible_team) { where.push('ro.responsible_team = ?'); params.push(filters.responsible_team); }
+    if (filters.source_type) { where.push('ro.source_type = ?'); params.push(filters.source_type); }
+    if (filters.source_id) { where.push('ro.source_id = ?'); params.push(filters.source_id); }
+    if (filters.handler) { where.push('ro.handler = ?'); params.push(filters.handler); }
+    if (filters.start_date) { where.push('ro.created_at >= ?'); params.push(filters.start_date); }
+    if (filters.end_date) { where.push('ro.created_at <= ?'); params.push(filters.end_date); }
+    if (filters.material) { where.push('b.material = ?'); params.push(filters.material); }
+
+    let sql = `
+      SELECT ro.*, b.cloth_no, b.vat_no, b.material, b.shade_target, b.status AS batch_status
+      FROM rework_orders ro
+      LEFT JOIN batches b ON b.id = ro.batch_id
+    `;
+    if (where.length) sql += ' WHERE ' + where.join(' AND ');
+    sql += ' ORDER BY ro.created_at DESC';
+
+    return db.prepare(sql).all(...params);
+  },
+
+  getOverview() {
+    const now = new Date().toISOString();
+    const statusCounts = db.prepare(`
+      SELECT status, COUNT(*) AS count
+      FROM rework_orders
+      GROUP BY status
+    `).all();
+
+    const openPlaceholders = REWORK_OPEN_STATUSES.map(() => '?').join(',');
+    const overdue = db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM rework_orders
+      WHERE status IN (${openPlaceholders})
+      AND planned_completion_at IS NOT NULL
+      AND planned_completion_at < ?
+    `).get(...REWORK_OPEN_STATUSES, now).count;
+
+    const byMaterial = db.prepare(`
+      SELECT b.material,
+             COUNT(ro.id) AS total,
+             SUM(CASE WHEN ro.status IN (${openPlaceholders}) THEN 1 ELSE 0 END) AS open_count,
+             SUM(CASE WHEN ro.status = 'completed' THEN 1 ELSE 0 END) AS completed_count,
+             SUM(CASE WHEN ro.status = 'closed' THEN 1 ELSE 0 END) AS closed_count,
+             SUM(CASE WHEN ro.status IN (${openPlaceholders}) AND ro.planned_completion_at < ? THEN 1 ELSE 0 END) AS overdue_count
+      FROM rework_orders ro
+      LEFT JOIN batches b ON b.id = ro.batch_id
+      GROUP BY b.material
+      ORDER BY total DESC
+    `).all(...REWORK_OPEN_STATUSES, ...REWORK_OPEN_STATUSES, now);
+
+    const byTeam = db.prepare(`
+      SELECT responsible_team,
+             COUNT(*) AS total,
+             SUM(CASE WHEN status IN (${openPlaceholders}) THEN 1 ELSE 0 END) AS open_count,
+             SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed_count,
+             SUM(CASE WHEN status = 'closed' THEN 1 ELSE 0 END) AS closed_count,
+             SUM(CASE WHEN status IN (${openPlaceholders}) AND planned_completion_at < ? THEN 1 ELSE 0 END) AS overdue_count
+      FROM rework_orders
+      GROUP BY responsible_team
+      ORDER BY total DESC
+    `).all(...REWORK_OPEN_STATUSES, ...REWORK_OPEN_STATUSES, now);
+
+    const openOrdersWithBatches = db.prepare(`
+      SELECT ro.*, b.cloth_no, b.vat_no, b.material, b.shade_target, b.status AS batch_status,
+             CASE WHEN ro.planned_completion_at < ? THEN 1 ELSE 0 END AS is_overdue
+      FROM rework_orders ro
+      LEFT JOIN batches b ON b.id = ro.batch_id
+      WHERE ro.status IN (${openPlaceholders})
+      ORDER BY ro.created_at DESC
+    `).all(now, ...REWORK_OPEN_STATUSES);
+
+    const result = {
+      pending_count: 0,
+      processing_count: 0,
+      completed_count: 0,
+      closed_count: 0,
+      total_count: 0,
+      open_count: 0,
+      overdue_count: overdue,
+      by_material: byMaterial,
+      by_team: byTeam,
+      open_orders: openOrdersWithBatches
+    };
+
+    for (const row of statusCounts) {
+      result.total_count += row.count;
+      if (row.status === 'pending') { result.pending_count = row.count; result.open_count += row.count; }
+      else if (row.status === 'processing') { result.processing_count = row.count; result.open_count += row.count; }
+      else if (row.status === 'completed') result.completed_count = row.count;
+      else if (row.status === 'closed') result.closed_count = row.count;
+    }
+
+    return result;
+  },
+
+  getOverdueReworks() {
+    const now = new Date().toISOString();
+    const placeholders = REWORK_OPEN_STATUSES.map(() => '?').join(',');
+    return db.prepare(`
+      SELECT ro.*, b.cloth_no, b.vat_no, b.material, b.shade_target, b.status AS batch_status
+      FROM rework_orders ro
+      LEFT JOIN batches b ON b.id = ro.batch_id
+      WHERE ro.status IN (${placeholders})
+      AND ro.planned_completion_at IS NOT NULL
+      AND ro.planned_completion_at < ?
+      ORDER BY ro.planned_completion_at ASC
+    `).all(...REWORK_OPEN_STATUSES, now);
+  }
+};
+
 const statsRepo = {
   getOverdueRechecks() {
     const now = new Date().toISOString();
@@ -626,9 +925,13 @@ module.exports = {
   statsRepo,
   vatOccupancyRepo,
   exceptionRepo,
+  reworkRepo,
   ACTIVE_STATUSES,
   RECHECK_WAITING_STATUSES,
   EXCEPTION_TYPES,
   EXCEPTION_STATUSES,
+  REWORK_SOURCE_TYPES,
+  REWORK_STATUSES,
+  REWORK_OPEN_STATUSES,
   nullish
 };

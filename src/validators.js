@@ -1,5 +1,5 @@
 const Joi = require('joi');
-const { batchRepo, operationRepo, vatRepo, materialRepo, vatOccupancyRepo, exceptionRepo, EXCEPTION_TYPES, EXCEPTION_STATUSES } = require('./repositories');
+const { batchRepo, operationRepo, vatRepo, materialRepo, vatOccupancyRepo, exceptionRepo, reworkRepo, EXCEPTION_TYPES, EXCEPTION_STATUSES, REWORK_SOURCE_TYPES, REWORK_STATUSES, REWORK_OPEN_STATUSES } = require('./repositories');
 
 const VALID_STATUSES = ['待预洗', '浸染中', '晾置中', '待复验', '需补染', '通过', '停留观察'];
 const VALID_OP_TYPES = ['预洗', '浸染', '晾置', '固色', '复验', '补染', '色差登记', '其他'];
@@ -35,7 +35,8 @@ const schemas = {
     redye_suggestion: Joi.string().allow('', null),
     temperature: Joi.number().allow(null),
     duration_minutes: Joi.number().integer().min(0).allow(null),
-    remark: Joi.string().allow('', null)
+    remark: Joi.string().allow('', null),
+    rework_order_id: Joi.number().integer().min(1).allow(null)
   }),
 
   vat: Joi.object({
@@ -92,6 +93,53 @@ const schemas = {
     handler: Joi.string().trim(),
     start_date: Joi.string().isoDate(),
     end_date: Joi.string().isoDate()
+  }),
+
+  createRework: Joi.object({
+    batch_id: Joi.number().integer().min(1).required(),
+    source_type: Joi.string().required().valid(...REWORK_SOURCE_TYPES),
+    source_id: Joi.number().integer().min(1).allow(null),
+    rework_reason: Joi.string().required().trim().min(1),
+    disposal_plan: Joi.string().required().trim().min(1),
+    responsible_team: Joi.string().required().trim().min(1),
+    planned_completion_at: Joi.string().isoDate().required(),
+    actual_completion_at: Joi.string().isoDate().allow(null),
+    status: Joi.string().valid(...REWORK_STATUSES).default('pending'),
+    process_remark: Joi.string().allow('', null),
+    handler: Joi.string().trim().allow('', null)
+  }),
+
+  updateRework: Joi.object({
+    rework_reason: Joi.string().trim().min(1),
+    disposal_plan: Joi.string().trim().min(1),
+    responsible_team: Joi.string().trim().min(1),
+    planned_completion_at: Joi.string().isoDate(),
+    actual_completion_at: Joi.string().isoDate().allow(null),
+    status: Joi.string().valid(...REWORK_STATUSES),
+    process_remark: Joi.string().allow('', null),
+    handler: Joi.string().trim().allow('', null),
+    source_type: Joi.string().valid(...REWORK_SOURCE_TYPES),
+    source_id: Joi.number().integer().min(1).allow(null)
+  }),
+
+  closeRework: Joi.object({
+    process_remark: Joi.string().allow('', null)
+  }),
+
+  appendReworkRemark: Joi.object({
+    process_remark: Joi.string().required().trim().min(1)
+  }),
+
+  reworkQuery: Joi.object({
+    batch_id: Joi.number().integer().min(1),
+    status: Joi.string().valid(...REWORK_STATUSES),
+    responsible_team: Joi.string().trim(),
+    source_type: Joi.string().valid(...REWORK_SOURCE_TYPES),
+    source_id: Joi.number().integer().min(1),
+    handler: Joi.string().trim(),
+    start_date: Joi.string().isoDate(),
+    end_date: Joi.string().isoDate(),
+    material: Joi.string().trim()
   })
 };
 
@@ -355,6 +403,72 @@ function autoGenerateExceptionFromWarning(batchId, warningType, warningDetail) {
   return { created: true, exception };
 }
 
+function checkReworkExists(id) {
+  const rework = reworkRepo.getById(id);
+  if (!rework) {
+    return { exists: false, message: '返工处置单不存在' };
+  }
+  return { exists: true, rework };
+}
+
+function checkBatchExistsForRework(batchId) {
+  const batch = batchRepo.getById(batchId);
+  if (!batch) {
+    return { exists: false, message: `批次 ${batchId} 不存在` };
+  }
+  return { exists: true, batch };
+}
+
+function checkReworkStatusTransition(currentStatus, targetStatus) {
+  if (currentStatus === targetStatus) {
+    return { valid: true };
+  }
+  if (currentStatus === 'closed') {
+    return {
+      valid: false,
+      message: '已关闭的返工处置单不可重新打开'
+    };
+  }
+  if (currentStatus === 'completed' && targetStatus === 'pending') {
+    return {
+      valid: false,
+      message: '已完成的返工处置单不可退回到待处理状态'
+    };
+  }
+  return { valid: true };
+}
+
+function checkReworkOverdue(rework) {
+  if (!REWORK_OPEN_STATUSES.includes(rework.status)) return { overdue: false };
+  if (!rework.planned_completion_at) return { overdue: false };
+
+  const now = new Date();
+  const planned = new Date(rework.planned_completion_at);
+  if (now > planned) {
+    const hours = Math.floor((now - planned) / (60 * 60 * 1000));
+    return {
+      overdue: true,
+      message: `返工处置已逾期 ${hours} 小时`,
+      overdue_hours: hours
+    };
+  }
+  return { overdue: false };
+}
+
+function checkReworkClosed(id) {
+  const rework = reworkRepo.getById(id);
+  if (!rework) {
+    return { closed: false, message: '返工处置单不存在' };
+  }
+  if (rework.status === 'closed') {
+    return {
+      closed: true,
+      message: '已关闭的返工处置单不可继续追加处理记录'
+    };
+  }
+  return { closed: false, rework };
+}
+
 module.exports = {
   schemas,
   validate,
@@ -372,8 +486,16 @@ module.exports = {
   checkBatchExistsForException,
   checkExceptionStatusTransition,
   autoGenerateExceptionFromWarning,
+  checkReworkExists,
+  checkBatchExistsForRework,
+  checkReworkStatusTransition,
+  checkReworkOverdue,
+  checkReworkClosed,
   VALID_STATUSES,
   VALID_OP_TYPES,
   EXCEPTION_TYPES,
-  EXCEPTION_STATUSES
+  EXCEPTION_STATUSES,
+  REWORK_SOURCE_TYPES,
+  REWORK_STATUSES,
+  REWORK_OPEN_STATUSES
 };

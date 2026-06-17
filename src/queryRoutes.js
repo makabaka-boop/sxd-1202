@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('./db');
-const { batchRepo, operationRepo, materialRepo, statsRepo, exceptionRepo } = require('./repositories');
+const { batchRepo, operationRepo, materialRepo, statsRepo, exceptionRepo, reworkRepo } = require('./repositories');
 const {
   schemas,
   validateQuery,
@@ -9,7 +9,8 @@ const {
   checkContinuousColorDeviation,
   checkRedyeWithoutColor,
   checkMaterialHighFailure,
-  autoGenerateExceptionFromWarning
+  autoGenerateExceptionFromWarning,
+  checkReworkOverdue
 } = require('./validators');
 
 router.get('/batches', validateQuery(schemas.query), (req, res) => {
@@ -58,8 +59,39 @@ router.get('/batches/:id', (req, res) => {
     tx();
 
     const openExceptions = exceptionRepo.getByBatch(batch.id, false);
+    const reworks = reworkRepo.getByBatch(batch.id, true);
 
-    res.json({ ...batch, operations, warnings, open_exceptions: openExceptions });
+    const reworkWarnings = [];
+    for (const rw of reworks) {
+      const rwOverdue = checkReworkOverdue(rw);
+      if (rwOverdue.overdue) {
+        reworkWarnings.push({
+          rework_id: rw.id,
+          type: 'rework_overdue',
+          ...rwOverdue
+        });
+      }
+    }
+
+    const openReworks = reworks.filter(r => ['pending', 'processing'].includes(r.status));
+    const overdueReworks = reworks.filter(r => {
+      if (!['pending', 'processing'].includes(r.status)) return false;
+      if (!r.planned_completion_at) return false;
+      return new Date(r.planned_completion_at) < new Date();
+    });
+
+    res.json({
+      ...batch,
+      operations,
+      warnings: [...warnings, ...reworkWarnings],
+      open_exceptions: openExceptions,
+      reworks,
+      rework_summary: {
+        total: reworks.length,
+        open_count: openReworks.length,
+        overdue_count: overdueReworks.length
+      }
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -141,6 +173,7 @@ router.get('/stats/overview', (req, res) => {
     const materialRates = materialRepo.getPassRate(days);
     const highFailures = checkMaterialHighFailure();
     const exceptionOverview = exceptionRepo.getOverview();
+    const reworkOverview = reworkRepo.getOverview();
 
     res.json({
       total_batches: allBatches.length,
@@ -165,7 +198,8 @@ router.get('/stats/overview', (req, res) => {
           is_high_failure: highFailures.some(h => h.material === r.material_name)
         }))
       },
-      exception_disposal: exceptionOverview
+      exception_disposal: exceptionOverview,
+      rework_disposal: reworkOverview
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -176,6 +210,72 @@ router.get('/stats/exception-overview', (req, res) => {
   try {
     const overview = exceptionRepo.getOverview();
     res.json(overview);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/stats/rework-overview', (req, res) => {
+  try {
+    const overview = reworkRepo.getOverview();
+    res.json(overview);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/stats/rework-overdue', (req, res) => {
+  try {
+    const overdue = reworkRepo.getOverdueReworks();
+    res.json({
+      total: overdue.length,
+      reworks: overdue
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/reworks', validateQuery(schemas.reworkQuery), (req, res) => {
+  try {
+    const filters = req.validatedQuery || {};
+    const reworks = reworkRepo.list(filters);
+    res.json(reworks);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/reworks/:id', (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const rework = reworkRepo.getById(id);
+    if (!rework) {
+      return res.status(404).json({ error: '返工处置单不存在' });
+    }
+    const operations = operationRepo.listByReworkOrder(id);
+
+    const warnings = [];
+    const rwOverdue = checkReworkOverdue(rework);
+    if (rwOverdue.overdue) {
+      warnings.push({ type: 'rework_overdue', ...rwOverdue });
+    }
+
+    res.json({ ...rework, operations, warnings });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/exceptions/:id', (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const exception = exceptionRepo.getById(id);
+    if (!exception) {
+      return res.status(404).json({ error: '异常处置单不存在' });
+    }
+    const reworks = reworkRepo.getByException(id);
+    res.json({ ...exception, reworks });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
