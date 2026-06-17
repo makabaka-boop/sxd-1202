@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { batchRepo, operationRepo, materialRepo, statsRepo } = require('./repositories');
+const { batchRepo, operationRepo, materialRepo, statsRepo, exceptionRepo } = require('./repositories');
 const {
   schemas,
   validateQuery,
@@ -38,7 +38,9 @@ router.get('/batches/:id', (req, res) => {
     const redyeMissing = checkRedyeWithoutColor(batch.id);
     if (redyeMissing.missing) warnings.push({ type: 'redye_missing_color', ...redyeMissing });
 
-    res.json({ ...batch, operations, warnings });
+    const openExceptions = exceptionRepo.getByBatch(batch.id, false);
+
+    res.json({ ...batch, operations, warnings, open_exceptions: openExceptions });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -119,6 +121,7 @@ router.get('/stats/overview', (req, res) => {
     const redyeWithoutColor = statsRepo.getRedyeWithoutNewColor();
     const materialRates = materialRepo.getPassRate(days);
     const highFailures = checkMaterialHighFailure();
+    const exceptionOverview = exceptionRepo.getOverview();
 
     res.json({
       total_batches: allBatches.length,
@@ -142,8 +145,18 @@ router.get('/stats/overview', (req, res) => {
           ...r,
           is_high_failure: highFailures.some(h => h.material === r.material_name)
         }))
-      }
+      },
+      exception_disposal: exceptionOverview
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/stats/exception-overview', (req, res) => {
+  try {
+    const overview = exceptionRepo.getOverview();
+    res.json(overview);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

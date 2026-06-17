@@ -81,6 +81,28 @@ function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_operations_time ON operations(op_time);
     CREATE INDEX IF NOT EXISTS idx_vat_occ_vat ON vat_occupancy(vat_no);
     CREATE INDEX IF NOT EXISTS idx_vat_occ_time ON vat_occupancy(start_time, end_time);
+
+    CREATE TABLE IF NOT EXISTS exception_orders (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      batch_id INTEGER NOT NULL,
+      exception_type TEXT NOT NULL,
+      exception_desc TEXT NOT NULL,
+      handler TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      process_remark TEXT,
+      created_at TEXT NOT NULL,
+      closed_at TEXT,
+      FOREIGN KEY (batch_id) REFERENCES batches(id) ON DELETE CASCADE
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_exception_unique_open
+      ON exception_orders(batch_id, exception_type)
+      WHERE status IN ('pending', 'processing');
+
+    CREATE INDEX IF NOT EXISTS idx_exception_batch ON exception_orders(batch_id);
+    CREATE INDEX IF NOT EXISTS idx_exception_type ON exception_orders(exception_type);
+    CREATE INDEX IF NOT EXISTS idx_exception_status ON exception_orders(status);
+    CREATE INDEX IF NOT EXISTS idx_exception_created ON exception_orders(created_at);
   `);
 
   const now = new Date().toISOString();

@@ -1,5 +1,5 @@
 const Joi = require('joi');
-const { batchRepo, operationRepo, vatRepo, materialRepo, vatOccupancyRepo } = require('./repositories');
+const { batchRepo, operationRepo, vatRepo, materialRepo, vatOccupancyRepo, exceptionRepo, EXCEPTION_TYPES, EXCEPTION_STATUSES } = require('./repositories');
 
 const VALID_STATUSES = ['待预洗', '浸染中', '晾置中', '待复验', '需补染', '通过', '停留观察'];
 const VALID_OP_TYPES = ['预洗', '浸染', '晾置', '固色', '复验', '补染', '色差登记', '其他'];
@@ -58,6 +58,40 @@ const schemas = {
     start_date: Joi.string().isoDate(),
     end_date: Joi.string().isoDate(),
     edge_halo_level: Joi.number().integer().min(0).max(5)
+  }),
+
+  createException: Joi.object({
+    batch_id: Joi.number().integer().min(1).required(),
+    exception_type: Joi.string().required().valid(...EXCEPTION_TYPES),
+    exception_desc: Joi.string().required().trim().min(1),
+    handler: Joi.string().trim().allow('', null),
+    status: Joi.string().valid(...EXCEPTION_STATUSES).default('pending'),
+    process_remark: Joi.string().allow('', null)
+  }),
+
+  updateException: Joi.object({
+    exception_type: Joi.string().valid(...EXCEPTION_TYPES),
+    exception_desc: Joi.string().trim().min(1),
+    handler: Joi.string().trim().allow('', null),
+    status: Joi.string().valid(...EXCEPTION_STATUSES),
+    process_remark: Joi.string().allow('', null)
+  }),
+
+  appendExceptionRemark: Joi.object({
+    process_remark: Joi.string().required().trim().min(1)
+  }),
+
+  closeException: Joi.object({
+    process_remark: Joi.string().allow('', null)
+  }),
+
+  exceptionQuery: Joi.object({
+    batch_id: Joi.number().integer().min(1),
+    exception_type: Joi.string().valid(...EXCEPTION_TYPES),
+    status: Joi.string().valid(...EXCEPTION_STATUSES),
+    handler: Joi.string().trim(),
+    start_date: Joi.string().isoDate(),
+    end_date: Joi.string().isoDate()
   })
 };
 
@@ -242,6 +276,72 @@ function computeNextRecheck(batch) {
   return new Date(base.getTime() + batch.recheck_cycle * 60 * 60 * 1000).toISOString();
 }
 
+function checkExceptionDuplicate(batchId, exceptionType, excludeId = null) {
+  const existing = exceptionRepo.getOpenByBatchAndType(batchId, exceptionType);
+  if (existing && existing.id !== excludeId) {
+    return {
+      duplicate: true,
+      message: `批次 ${batchId} 已存在未关闭的 ${exceptionType} 类型异常处置单（ID: ${existing.id}）`
+    };
+  }
+  return { duplicate: false };
+}
+
+function checkExceptionExists(id) {
+  const exception = exceptionRepo.getById(id);
+  if (!exception) {
+    return { exists: false, message: '异常处置单不存在' };
+  }
+  return { exists: true, exception };
+}
+
+function checkBatchExistsForException(batchId) {
+  const batch = batchRepo.getById(batchId);
+  if (!batch) {
+    return { exists: false, message: `批次 ${batchId} 不存在` };
+  }
+  return { exists: true, batch };
+}
+
+function autoGenerateExceptionFromWarning(batchId, warningType, warningDetail) {
+  const existing = exceptionRepo.getOpenByBatchAndType(batchId, warningType);
+  if (existing) {
+    return { created: false, reason: '已存在未关闭的同类型异常处置单', existing };
+  }
+
+  const batchCheck = checkBatchExistsForException(batchId);
+  if (!batchCheck.exists) {
+    return { created: false, reason: batchCheck.message };
+  }
+
+  const exceptionTypeMap = {
+    recheck_overdue: { type: 'recheck_overdue', desc: '复验逾期' },
+    color_deviation: { type: 'color_deviation', desc: '连续色差偏离' },
+    redye_missing_color: { type: 'redye_missing_color', desc: '补染后未登记新色差' }
+  };
+
+  const typeInfo = exceptionTypeMap[warningType];
+  if (!typeInfo) {
+    return { created: false, reason: `未知的警告类型: ${warningType}` };
+  }
+
+  let exceptionDesc = typeInfo.desc;
+  if (warningDetail && warningDetail.message) {
+    exceptionDesc = warningDetail.message;
+  } else if (typeof warningDetail === 'string') {
+    exceptionDesc = warningDetail;
+  }
+
+  const exception = exceptionRepo.create({
+    batch_id: batchId,
+    exception_type: typeInfo.type,
+    exception_desc: exceptionDesc,
+    status: 'pending'
+  });
+
+  return { created: true, exception };
+}
+
 module.exports = {
   schemas,
   validate,
@@ -254,6 +354,12 @@ module.exports = {
   checkContinuousColorDeviation,
   checkMaterialHighFailure,
   computeNextRecheck,
+  checkExceptionDuplicate,
+  checkExceptionExists,
+  checkBatchExistsForException,
+  autoGenerateExceptionFromWarning,
   VALID_STATUSES,
-  VALID_OP_TYPES
+  VALID_OP_TYPES,
+  EXCEPTION_TYPES,
+  EXCEPTION_STATUSES
 };

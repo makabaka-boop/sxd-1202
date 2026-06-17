@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('./db');
-const { batchRepo, operationRepo, vatRepo, vatOccupancyRepo } = require('./repositories');
+const { batchRepo, operationRepo, vatRepo, vatOccupancyRepo, exceptionRepo } = require('./repositories');
 const {
   schemas,
   validate,
@@ -10,7 +10,8 @@ const {
   checkContinuousColorDeviation,
   checkRedyeWithoutColor,
   checkVatConflict,
-  computeNextRecheck
+  computeNextRecheck,
+  checkExceptionExists
 } = require('./validators');
 
 router.post('/batches/:id/operations', validate(schemas.operation), (req, res) => {
@@ -274,7 +275,13 @@ router.get('/batches/:id/warnings', (req, res) => {
       });
     }
 
-    res.json({ batch_id: batchId, warnings });
+    const openExceptions = exceptionRepo.getByBatch(batchId, false);
+
+    res.json({
+      batch_id: batchId,
+      warnings,
+      open_exceptions: openExceptions
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -302,6 +309,45 @@ router.get('/vats/:vat_no/occupancy', (req, res) => {
     res.json({ vat_no, active, history: list });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/exceptions/:id', (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const exception = exceptionRepo.getById(id);
+    if (!exception) {
+      return res.status(404).json({ error: '异常处置单不存在' });
+    }
+    res.json(exception);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/exceptions/:id/remark', validate(schemas.appendExceptionRemark), (req, res) => {
+  const tx = db.transaction(() => {
+    const id = parseInt(req.params.id);
+    const data = req.validated;
+
+    const existCheck = checkExceptionExists(id);
+    if (!existCheck.exists) {
+      throw new Error(existCheck.message);
+    }
+
+    const existing = existCheck.exception;
+    if (existing.status === 'closed') {
+      throw new Error('已关闭的异常处置单不可追加备注');
+    }
+
+    return exceptionRepo.appendRemark(id, data.process_remark);
+  });
+
+  try {
+    const exception = tx();
+    res.json(exception);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
   }
 });
 

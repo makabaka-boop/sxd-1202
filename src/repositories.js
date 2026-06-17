@@ -363,6 +363,175 @@ const materialRepo = {
   }
 };
 
+const EXCEPTION_TYPES = ['recheck_overdue', 'color_deviation', 'redye_missing_color'];
+const EXCEPTION_STATUSES = ['pending', 'processing', 'closed'];
+
+const exceptionRepo = {
+  create(data) {
+    const now = new Date().toISOString();
+    const stmt = db.prepare(`
+      INSERT INTO exception_orders
+      (batch_id, exception_type, exception_desc, handler, status, process_remark, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    const result = stmt.run(
+      data.batch_id,
+      data.exception_type,
+      data.exception_desc,
+      nullish(data.handler),
+      nullish(data.status, 'pending'),
+      nullish(data.process_remark),
+      now
+    );
+    return this.getById(result.lastInsertRowid);
+  },
+
+  update(id, data) {
+    const fields = [];
+    const values = [];
+    const allowed = ['exception_type', 'exception_desc', 'handler', 'status', 'process_remark'];
+    for (const key of allowed) {
+      if (data[key] !== undefined) {
+        fields.push(`${key} = ?`);
+        values.push(data[key]);
+      }
+    }
+    if (values.length === 0) return this.getById(id);
+    values.push(id);
+    const stmt = db.prepare(`UPDATE exception_orders SET ${fields.join(', ')} WHERE id = ?`);
+    stmt.run(...values);
+    return this.getById(id);
+  },
+
+  close(id, process_remark = null) {
+    const now = new Date().toISOString();
+    const fields = ['status = ?', 'closed_at = ?'];
+    const values = ['closed', now];
+    if (process_remark !== null && process_remark !== undefined) {
+      fields.push('process_remark = ?');
+      values.push(process_remark);
+    }
+    values.push(id);
+    const stmt = db.prepare(`UPDATE exception_orders SET ${fields.join(', ')} WHERE id = ?`);
+    stmt.run(...values);
+    return this.getById(id);
+  },
+
+  appendRemark(id, remark) {
+    const existing = this.getById(id);
+    if (!existing) return null;
+    const combined = existing.process_remark
+      ? `${existing.process_remark}\n${remark}`
+      : remark;
+    return this.update(id, { process_remark: combined });
+  },
+
+  getById(id) {
+    return db.prepare(`
+      SELECT eo.*, b.cloth_no, b.vat_no, b.material, b.shade_target, b.status AS batch_status
+      FROM exception_orders eo
+      LEFT JOIN batches b ON b.id = eo.batch_id
+      WHERE eo.id = ?
+    `).get(id);
+  },
+
+  getByBatch(batchId, includeClosed = false) {
+    let sql = `
+      SELECT eo.*, b.cloth_no, b.vat_no, b.material, b.shade_target, b.status AS batch_status
+      FROM exception_orders eo
+      LEFT JOIN batches b ON b.id = eo.batch_id
+      WHERE eo.batch_id = ?
+    `;
+    const params = [batchId];
+    if (!includeClosed) {
+      sql += ' AND eo.status IN (?, ?)';
+      params.push('pending', 'processing');
+    }
+    sql += ' ORDER BY eo.created_at DESC';
+    return db.prepare(sql).all(...params);
+  },
+
+  getOpenByBatchAndType(batchId, exceptionType) {
+    return db.prepare(`
+      SELECT * FROM exception_orders
+      WHERE batch_id = ? AND exception_type = ? AND status IN ('pending', 'processing')
+      ORDER BY created_at DESC LIMIT 1
+    `).get(batchId, exceptionType);
+  },
+
+  list(filters = {}) {
+    const where = [];
+    const params = [];
+
+    if (filters.batch_id) { where.push('eo.batch_id = ?'); params.push(filters.batch_id); }
+    if (filters.exception_type) { where.push('eo.exception_type = ?'); params.push(filters.exception_type); }
+    if (filters.status) { where.push('eo.status = ?'); params.push(filters.status); }
+    if (filters.handler) { where.push('eo.handler = ?'); params.push(filters.handler); }
+    if (filters.start_date) { where.push('eo.created_at >= ?'); params.push(filters.start_date); }
+    if (filters.end_date) { where.push('eo.created_at <= ?'); params.push(filters.end_date); }
+
+    let sql = `
+      SELECT eo.*, b.cloth_no, b.vat_no, b.material, b.shade_target, b.status AS batch_status
+      FROM exception_orders eo
+      LEFT JOIN batches b ON b.id = eo.batch_id
+    `;
+    if (where.length) sql += ' WHERE ' + where.join(' AND ');
+    sql += ' ORDER BY eo.created_at DESC';
+
+    return db.prepare(sql).all(...params);
+  },
+
+  getOverview() {
+    const statusCounts = db.prepare(`
+      SELECT status, COUNT(*) AS count
+      FROM exception_orders
+      GROUP BY status
+    `).all();
+
+    const typeCounts = db.prepare(`
+      SELECT exception_type, COUNT(*) AS count
+      FROM exception_orders
+      GROUP BY exception_type
+    `).all();
+
+    const openOrdersWithBatches = db.prepare(`
+      SELECT eo.*, b.cloth_no, b.vat_no, b.material, b.shade_target, b.status AS batch_status
+      FROM exception_orders eo
+      LEFT JOIN batches b ON b.id = eo.batch_id
+      WHERE eo.status IN ('pending', 'processing')
+      ORDER BY eo.created_at DESC
+    `).all();
+
+    const result = {
+      pending_count: 0,
+      processing_count: 0,
+      closed_count: 0,
+      total_count: 0,
+      by_type: {},
+      open_orders: openOrdersWithBatches
+    };
+
+    for (const row of statusCounts) {
+      result.total_count += row.count;
+      if (row.status === 'pending') result.pending_count = row.count;
+      else if (row.status === 'processing') result.processing_count = row.count;
+      else if (row.status === 'closed') result.closed_count = row.count;
+    }
+
+    for (const row of typeCounts) {
+      result.by_type[row.exception_type] = row.count;
+    }
+
+    for (const type of EXCEPTION_TYPES) {
+      if (result.by_type[type] === undefined) {
+        result.by_type[type] = 0;
+      }
+    }
+
+    return result;
+  }
+};
+
 const statsRepo = {
   getOverdueRechecks() {
     const now = new Date().toISOString();
@@ -439,7 +608,10 @@ module.exports = {
   materialRepo,
   statsRepo,
   vatOccupancyRepo,
+  exceptionRepo,
   ACTIVE_STATUSES,
   RECHECK_WAITING_STATUSES,
+  EXCEPTION_TYPES,
+  EXCEPTION_STATUSES,
   nullish
 };

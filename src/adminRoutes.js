@@ -1,13 +1,17 @@
 const express = require('express');
 const router = express.Router();
 const db = require('./db');
-const { batchRepo, vatRepo, materialRepo, operationRepo } = require('./repositories');
+const { batchRepo, vatRepo, materialRepo, operationRepo, exceptionRepo } = require('./repositories');
 const {
   schemas,
   validate,
+  validateQuery,
   checkVatConflict,
   checkStatusTransition,
-  computeNextRecheck
+  computeNextRecheck,
+  checkExceptionDuplicate,
+  checkExceptionExists,
+  checkBatchExistsForException
 } = require('./validators');
 
 router.get('/batches', (req, res) => {
@@ -271,6 +275,123 @@ router.delete('/materials/:id', (req, res) => {
     res.json({ message: '删除成功' });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/exceptions', validateQuery(schemas.exceptionQuery), (req, res) => {
+  try {
+    const filters = req.validatedQuery || {};
+    const exceptions = exceptionRepo.list(filters);
+    res.json(exceptions);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/exceptions/:id', (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const exception = exceptionRepo.getById(id);
+    if (!exception) {
+      return res.status(404).json({ error: '异常处置单不存在' });
+    }
+    res.json(exception);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/exceptions', validate(schemas.createException), (req, res) => {
+  const tx = db.transaction(() => {
+    const data = req.validated;
+
+    const batchCheck = checkBatchExistsForException(data.batch_id);
+    if (!batchCheck.exists) {
+      throw new Error(batchCheck.message);
+    }
+
+    const dupCheck = checkExceptionDuplicate(data.batch_id, data.exception_type);
+    if (dupCheck.duplicate) {
+      throw new Error(dupCheck.message);
+    }
+
+    return exceptionRepo.create(data);
+  });
+
+  try {
+    const exception = tx();
+    res.status(201).json(exception);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+router.put('/exceptions/:id', validate(schemas.updateException), (req, res) => {
+  const tx = db.transaction(() => {
+    const id = parseInt(req.params.id);
+    const data = req.validated;
+
+    const existCheck = checkExceptionExists(id);
+    if (!existCheck.exists) {
+      throw new Error(existCheck.message);
+    }
+
+    const existing = existCheck.exception;
+
+    if (data.exception_type && data.exception_type !== existing.exception_type) {
+      const dupCheck = checkExceptionDuplicate(existing.batch_id, data.exception_type, id);
+      if (dupCheck.duplicate) {
+        throw new Error(dupCheck.message);
+      }
+    }
+
+    if (data.status === 'closed') {
+      const batchCheck = checkBatchExistsForException(existing.batch_id);
+      if (!batchCheck.exists) {
+        throw new Error('关联批次不存在，无法关闭异常处置单');
+      }
+      return exceptionRepo.close(id, data.process_remark);
+    }
+
+    return exceptionRepo.update(id, data);
+  });
+
+  try {
+    const exception = tx();
+    res.json(exception);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+router.post('/exceptions/:id/close', validate(schemas.closeException), (req, res) => {
+  const tx = db.transaction(() => {
+    const id = parseInt(req.params.id);
+    const data = req.validated;
+
+    const existCheck = checkExceptionExists(id);
+    if (!existCheck.exists) {
+      throw new Error(existCheck.message);
+    }
+
+    const existing = existCheck.exception;
+    if (existing.status === 'closed') {
+      throw new Error('异常处置单已关闭');
+    }
+
+    const batchCheck = checkBatchExistsForException(existing.batch_id);
+    if (!batchCheck.exists) {
+      throw new Error('关联批次不存在，无法关闭异常处置单');
+    }
+
+    return exceptionRepo.close(id, data.process_remark);
+  });
+
+  try {
+    const exception = tx();
+    res.json(exception);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
   }
 });
 
