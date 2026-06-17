@@ -1,0 +1,90 @@
+const Database = require('better-sqlite3');
+const path = require('path');
+
+const dbPath = path.join(__dirname, '..', 'data.db');
+const db = new Database(dbPath);
+
+db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
+
+function initDatabase() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS batches (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      cloth_no TEXT NOT NULL UNIQUE,
+      vat_no TEXT NOT NULL,
+      material TEXT NOT NULL,
+      shade_target TEXT NOT NULL,
+      responsible_team TEXT NOT NULL,
+      recheck_cycle INTEGER NOT NULL DEFAULT 24,
+      status TEXT NOT NULL DEFAULT '待预洗',
+      dip_count INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      last_recheck_at TEXT,
+      next_recheck_at TEXT,
+      remark TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS operations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      batch_id INTEGER NOT NULL,
+      op_type TEXT NOT NULL,
+      op_time TEXT NOT NULL,
+      operator TEXT,
+      color_diff_desc TEXT,
+      edge_halo_level INTEGER,
+      redye_suggestion TEXT,
+      temperature REAL,
+      duration_minutes INTEGER,
+      remark TEXT,
+      FOREIGN KEY (batch_id) REFERENCES batches(id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS vats (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      vat_no TEXT NOT NULL UNIQUE,
+      vat_name TEXT,
+      capacity REAL,
+      status TEXT NOT NULL DEFAULT '空闲',
+      current_batch_id INTEGER,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (current_batch_id) REFERENCES batches(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS materials (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      material_name TEXT NOT NULL UNIQUE,
+      material_desc TEXT,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_batches_vat ON batches(vat_no);
+    CREATE INDEX IF NOT EXISTS idx_batches_material ON batches(material);
+    CREATE INDEX IF NOT EXISTS idx_batches_status ON batches(status);
+    CREATE INDEX IF NOT EXISTS idx_batches_team ON batches(responsible_team);
+    CREATE INDEX IF NOT EXISTS idx_batches_shade ON batches(shade_target);
+    CREATE INDEX IF NOT EXISTS idx_batches_created ON batches(created_at);
+    CREATE INDEX IF NOT EXISTS idx_operations_batch ON operations(batch_id);
+    CREATE INDEX IF NOT EXISTS idx_operations_type ON operations(op_type);
+    CREATE INDEX IF NOT EXISTS idx_operations_time ON operations(op_time);
+  `);
+
+  const now = new Date().toISOString();
+  const defaultMaterials = ['纯棉', '亚麻', '丝绸', '羊毛', '混纺'];
+  const insertMaterial = db.prepare('INSERT OR IGNORE INTO materials (material_name, created_at) VALUES (?, ?)');
+  for (const m of defaultMaterials) {
+    insertMaterial.run(m, now);
+  }
+
+  const defaultVats = ['V-001', 'V-002', 'V-003', 'V-004', 'V-005'];
+  const insertVat = db.prepare('INSERT OR IGNORE INTO vats (vat_no, status, created_at, updated_at) VALUES (?, ?, ?, ?)');
+  for (const v of defaultVats) {
+    insertVat.run(v, '空闲', now, now);
+  }
+}
+
+initDatabase();
+
+module.exports = db;
