@@ -11,7 +11,8 @@ const {
   checkRedyeWithoutColor,
   checkVatConflict,
   computeNextRecheck,
-  checkExceptionExists
+  checkExceptionExists,
+  autoGenerateExceptionFromWarning
 } = require('./validators');
 
 router.post('/batches/:id/operations', validate(schemas.operation), (req, res) => {
@@ -248,32 +249,38 @@ router.get('/batches/:id/warnings', (req, res) => {
 
     const warnings = [];
 
-    const overdue = checkRecheckOverdue(batch);
-    if (overdue.overdue) {
-      warnings.push({
-        type: 'recheck_overdue',
-        message: overdue.message,
-        detail: overdue
-      });
-    }
+    const tx = db.transaction(() => {
+      const overdue = checkRecheckOverdue(batch);
+      if (overdue.overdue) {
+        warnings.push({
+          type: 'recheck_overdue',
+          message: overdue.message,
+          detail: overdue
+        });
+        autoGenerateExceptionFromWarning(batchId, 'recheck_overdue', overdue);
+      }
 
-    const deviation = checkContinuousColorDeviation(batchId);
-    if (deviation.deviation) {
-      warnings.push({
-        type: 'color_deviation',
-        message: deviation.message,
-        detail: deviation
-      });
-    }
+      const deviation = checkContinuousColorDeviation(batchId);
+      if (deviation.deviation) {
+        warnings.push({
+          type: 'color_deviation',
+          message: deviation.message,
+          detail: deviation
+        });
+        autoGenerateExceptionFromWarning(batchId, 'color_deviation', deviation);
+      }
 
-    const redyeMissing = checkRedyeWithoutColor(batchId);
-    if (redyeMissing.missing) {
-      warnings.push({
-        type: 'redye_missing_color',
-        message: redyeMissing.message,
-        detail: redyeMissing
-      });
-    }
+      const redyeMissing = checkRedyeWithoutColor(batchId);
+      if (redyeMissing.missing) {
+        warnings.push({
+          type: 'redye_missing_color',
+          message: redyeMissing.message,
+          detail: redyeMissing
+        });
+        autoGenerateExceptionFromWarning(batchId, 'redye_missing_color', redyeMissing);
+      }
+    });
+    tx();
 
     const openExceptions = exceptionRepo.getByBatch(batchId, false);
 

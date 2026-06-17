@@ -369,24 +369,30 @@ const EXCEPTION_STATUSES = ['pending', 'processing', 'closed'];
 const exceptionRepo = {
   create(data) {
     const now = new Date().toISOString();
+    const status = nullish(data.status, 'pending');
+    const closedAt = status === 'closed' ? now : null;
     const stmt = db.prepare(`
       INSERT INTO exception_orders
-      (batch_id, exception_type, exception_desc, handler, status, process_remark, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      (batch_id, exception_type, exception_desc, handler, status, process_remark, created_at, closed_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const result = stmt.run(
       data.batch_id,
       data.exception_type,
       data.exception_desc,
       nullish(data.handler),
-      nullish(data.status, 'pending'),
+      status,
       nullish(data.process_remark),
-      now
+      now,
+      closedAt
     );
     return this.getById(result.lastInsertRowid);
   },
 
   update(id, data) {
+    const existing = this.getById(id);
+    if (!existing) return null;
+
     const fields = [];
     const values = [];
     const allowed = ['exception_type', 'exception_desc', 'handler', 'status', 'process_remark'];
@@ -396,7 +402,18 @@ const exceptionRepo = {
         values.push(data[key]);
       }
     }
-    if (values.length === 0) return this.getById(id);
+
+    if (data.status !== undefined && data.status !== existing.status) {
+      if (data.status === 'closed') {
+        fields.push('closed_at = ?');
+        values.push(new Date().toISOString());
+      } else if (existing.status === 'closed' && data.status !== 'closed') {
+        fields.push('closed_at = ?');
+        values.push(null);
+      }
+    }
+
+    if (values.length === 0) return existing;
     values.push(id);
     const stmt = db.prepare(`UPDATE exception_orders SET ${fields.join(', ')} WHERE id = ?`);
     stmt.run(...values);

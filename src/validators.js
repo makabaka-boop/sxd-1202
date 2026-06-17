@@ -303,6 +303,19 @@ function checkBatchExistsForException(batchId) {
   return { exists: true, batch };
 }
 
+function checkExceptionStatusTransition(currentStatus, targetStatus) {
+  if (currentStatus === targetStatus) {
+    return { valid: true };
+  }
+  if (currentStatus === 'closed') {
+    return {
+      valid: false,
+      message: '已关闭的异常处置单不可重新打开'
+    };
+  }
+  return { valid: true };
+}
+
 function autoGenerateExceptionFromWarning(batchId, warningType, warningDetail) {
   const existing = exceptionRepo.getOpenByBatchAndType(batchId, warningType);
   if (existing) {
@@ -357,6 +370,7 @@ module.exports = {
   checkExceptionDuplicate,
   checkExceptionExists,
   checkBatchExistsForException,
+  checkExceptionStatusTransition,
   autoGenerateExceptionFromWarning,
   VALID_STATUSES,
   VALID_OP_TYPES,

@@ -11,7 +11,8 @@ const {
   computeNextRecheck,
   checkExceptionDuplicate,
   checkExceptionExists,
-  checkBatchExistsForException
+  checkBatchExistsForException,
+  checkExceptionStatusTransition
 } = require('./validators');
 
 router.get('/batches', (req, res) => {
@@ -337,6 +338,13 @@ router.put('/exceptions/:id', validate(schemas.updateException), (req, res) => {
     }
 
     const existing = existCheck.exception;
+
+    if (data.status !== undefined && data.status !== existing.status) {
+      const transition = checkExceptionStatusTransition(existing.status, data.status);
+      if (!transition.valid) {
+        throw new Error(transition.message);
+      }
+    }
 
     if (data.exception_type && data.exception_type !== existing.exception_type) {
       const dupCheck = checkExceptionDuplicate(existing.batch_id, data.exception_type, id);
