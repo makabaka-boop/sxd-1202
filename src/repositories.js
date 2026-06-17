@@ -26,7 +26,7 @@ const batchRepo = {
     const now = new Date().toISOString();
     const fields = [];
     const values = [];
-    const allowed = ['cloth_no', 'vat_no', 'material', 'shade_target', 'responsible_team', 'recheck_cycle', 'status', 'dip_count', 'last_recheck_at', 'next_recheck_at', 'remark'];
+    const allowed = ['cloth_no', 'vat_no', 'material', 'shade_target', 'responsible_team', 'recheck_cycle', 'status', 'dip_count', 'last_recheck_at', 'next_recheck_at', 'remark', 'is_suspended', 'suspended_reason', 'suspended_by', 'suspended_at', 'expected_resume_at', 'pre_suspended_status'];
     for (const key of allowed) {
       if (data[key] !== undefined) {
         fields.push(`${key} = ?`);
@@ -63,6 +63,10 @@ const batchRepo = {
     if (filters.responsible_team) { where.push('b.responsible_team = ?'); params.push(filters.responsible_team); }
     if (filters.start_date) { where.push('b.created_at >= ?'); params.push(filters.start_date); }
     if (filters.end_date) { where.push('b.created_at <= ?'); params.push(filters.end_date); }
+    if (filters.is_suspended !== undefined) { where.push('b.is_suspended = ?'); params.push(filters.is_suspended ? 1 : 0); }
+    if (filters.suspended_reason) { where.push('b.suspended_reason LIKE ?'); params.push(`%${filters.suspended_reason}%`); }
+    if (filters.expected_resume_before) { where.push('b.expected_resume_at IS NOT NULL AND b.expected_resume_at <= ?'); params.push(filters.expected_resume_before); }
+    if (filters.expected_resume_after) { where.push('b.expected_resume_at IS NOT NULL AND b.expected_resume_at >= ?'); params.push(filters.expected_resume_after); }
 
     if (filters.edge_halo_level !== undefined) {
       const haloWhere = `o.edge_halo_level = ? AND o.id = (SELECT MAX(id) FROM operations WHERE batch_id = b.id AND edge_halo_level IS NOT NULL)`;
@@ -96,6 +100,24 @@ const batchRepo = {
   getAllActive() {
     const placeholders = ACTIVE_STATUSES.map(() => '?').join(',');
     return db.prepare(`SELECT * FROM batches WHERE status IN (${placeholders}) ORDER BY updated_at DESC`).get(...ACTIVE_STATUSES);
+  },
+
+  getSuspended() {
+    return db.prepare(`
+      SELECT * FROM batches WHERE is_suspended = 1
+      ORDER BY suspended_at DESC
+    `).all();
+  },
+
+  getOverdueSuspended() {
+    const now = new Date().toISOString();
+    return db.prepare(`
+      SELECT * FROM batches
+      WHERE is_suspended = 1
+      AND expected_resume_at IS NOT NULL
+      AND expected_resume_at < ?
+      ORDER BY expected_resume_at ASC
+    `).all(now);
   },
 
   listByHaloLevel(level) {
@@ -937,6 +959,33 @@ const statsRepo = {
       GROUP BY b.id
       ORDER BY o_redye.op_time DESC
     `).all();
+  },
+
+  getSuspendedStats() {
+    const now = new Date().toISOString();
+    const suspendedCount = db.prepare(`
+      SELECT COUNT(*) AS count FROM batches WHERE is_suspended = 1
+    `).get().count;
+
+    const overdueSuspendedCount = db.prepare(`
+      SELECT COUNT(*) AS count FROM batches
+      WHERE is_suspended = 1
+      AND expected_resume_at IS NOT NULL
+      AND expected_resume_at < ?
+    `).get(now).count;
+
+    const byReason = db.prepare(`
+      SELECT suspended_reason, COUNT(*) AS count
+      FROM batches WHERE is_suspended = 1
+      GROUP BY suspended_reason
+      ORDER BY count DESC
+    `).all();
+
+    return {
+      suspended_count: suspendedCount,
+      overdue_suspended_count: overdueSuspendedCount,
+      by_reason: byReason
+    };
   }
 };
 

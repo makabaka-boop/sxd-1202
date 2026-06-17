@@ -23,7 +23,13 @@ function createTables() {
       updated_at TEXT NOT NULL,
       last_recheck_at TEXT,
       next_recheck_at TEXT,
-      remark TEXT
+      remark TEXT,
+      is_suspended INTEGER NOT NULL DEFAULT 0,
+      suspended_reason TEXT,
+      suspended_by TEXT,
+      suspended_at TEXT,
+      expected_resume_at TEXT,
+      pre_suspended_status TEXT
     );
 
     CREATE TABLE IF NOT EXISTS operations (
@@ -119,6 +125,17 @@ function migrateSchema() {
   if (!hasSourceOpId) {
     db.exec(`ALTER TABLE rework_orders ADD COLUMN source_operation_id INTEGER REFERENCES operations(id) ON DELETE SET NULL`);
   }
+
+  const batchPragma = db.prepare("PRAGMA table_info(batches)").all();
+  const hasSuspended = batchPragma.some(c => c.name === 'is_suspended');
+  if (!hasSuspended) {
+    db.exec(`ALTER TABLE batches ADD COLUMN is_suspended INTEGER NOT NULL DEFAULT 0`);
+    db.exec(`ALTER TABLE batches ADD COLUMN suspended_reason TEXT`);
+    db.exec(`ALTER TABLE batches ADD COLUMN suspended_by TEXT`);
+    db.exec(`ALTER TABLE batches ADD COLUMN suspended_at TEXT`);
+    db.exec(`ALTER TABLE batches ADD COLUMN expected_resume_at TEXT`);
+    db.exec(`ALTER TABLE batches ADD COLUMN pre_suspended_status TEXT`);
+  }
 }
 
 function createIndexes() {
@@ -150,6 +167,10 @@ function createIndexes() {
     CREATE INDEX IF NOT EXISTS idx_rework_source ON rework_orders(source_type, source_id);
     CREATE INDEX IF NOT EXISTS idx_rework_planned ON rework_orders(planned_completion_at);
     CREATE INDEX IF NOT EXISTS idx_rework_created ON rework_orders(created_at);
+
+    CREATE INDEX IF NOT EXISTS idx_batches_suspended ON batches(is_suspended);
+    CREATE INDEX IF NOT EXISTS idx_batches_suspended_reason ON batches(suspended_reason);
+    CREATE INDEX IF NOT EXISTS idx_batches_expected_resume ON batches(expected_resume_at);
   `);
 }
 

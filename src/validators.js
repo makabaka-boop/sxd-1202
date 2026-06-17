@@ -1,8 +1,9 @@
 const Joi = require('joi');
 const { batchRepo, operationRepo, vatRepo, materialRepo, vatOccupancyRepo, exceptionRepo, reworkRepo, EXCEPTION_TYPES, EXCEPTION_STATUSES, REWORK_SOURCE_TYPES, REWORK_STATUSES, REWORK_OPEN_STATUSES } = require('./repositories');
 
-const VALID_STATUSES = ['待预洗', '浸染中', '晾置中', '待复验', '需补染', '通过', '停留观察'];
+const VALID_STATUSES = ['待预洗', '浸染中', '晾置中', '待复验', '需补染', '通过', '停留观察', '已挂起'];
 const VALID_OP_TYPES = ['预洗', '浸染', '晾置', '固色', '复验', '补染', '色差登记', '其他'];
+const SUSPENDED_REASONS = ['设备检修', '原料待料', '人工复核', '其他'];
 
 const schemas = {
   createBatch: Joi.object({
@@ -58,7 +59,21 @@ const schemas = {
     responsible_team: Joi.string().trim(),
     start_date: Joi.string().isoDate(),
     end_date: Joi.string().isoDate(),
-    edge_halo_level: Joi.number().integer().min(0).max(5)
+    edge_halo_level: Joi.number().integer().min(0).max(5),
+    is_suspended: Joi.number().integer().valid(0, 1),
+    suspended_reason: Joi.string().trim(),
+    expected_resume_before: Joi.string().isoDate(),
+    expected_resume_after: Joi.string().isoDate()
+  }),
+
+  suspendBatch: Joi.object({
+    suspended_reason: Joi.string().required().valid(...SUSPENDED_REASONS),
+    suspended_by: Joi.string().required().trim().min(1),
+    expected_resume_at: Joi.string().isoDate().required()
+  }),
+
+  resumeBatch: Joi.object({
+    remark: Joi.string().allow('', null)
   }),
 
   createException: Joi.object({
@@ -207,13 +222,14 @@ function checkVatConflictByStatus(vat_no, excludeBatchId = null) {
 
 function checkStatusTransition(currentStatus, targetStatus, opType) {
   const transitions = {
-    '待预洗': ['浸染中', '待预洗'],
-    '浸染中': ['晾置中', '待复验', '浸染中'],
-    '晾置中': ['待复验', '需补染', '浸染中', '晾置中'],
-    '待复验': ['通过', '需补染', '停留观察', '浸染中', '待复验'],
-    '需补染': ['浸染中', '待复验', '需补染'],
-    '停留观察': ['待复验', '需补染', '通过', '浸染中', '停留观察'],
-    '通过': ['通过']
+    '待预洗': ['浸染中', '待预洗', '已挂起'],
+    '浸染中': ['晾置中', '待复验', '浸染中', '已挂起'],
+    '晾置中': ['待复验', '需补染', '浸染中', '晾置中', '已挂起'],
+    '待复验': ['通过', '需补染', '停留观察', '浸染中', '待复验', '已挂起'],
+    '需补染': ['浸染中', '待复验', '需补染', '已挂起'],
+    '停留观察': ['待复验', '需补染', '通过', '浸染中', '停留观察', '已挂起'],
+    '通过': ['通过'],
+    '已挂起': ['待预洗', '浸染中', '晾置中', '待复验', '需补染', '停留观察']
   };
 
   if (opType) {
@@ -477,6 +493,42 @@ function checkReworkClosed(id) {
   return { exists: true, closed: false, rework };
 }
 
+function checkBatchSuspended(batch) {
+  if (batch.is_suspended) {
+    return {
+      suspended: true,
+      message: `批次 ${batch.id} 已挂起（原因：${batch.suspended_reason || '未知'}），无法执行操作，请先恢复批次`
+    };
+  }
+  return { suspended: false };
+}
+
+function checkBatchCanSuspend(batch) {
+  if (batch.is_suspended) {
+    return {
+      canSuspend: false,
+      message: `批次 ${batch.id} 已处于挂起状态`
+    };
+  }
+  if (batch.status === '通过') {
+    return {
+      canSuspend: false,
+      message: '已通过的批次不可挂起'
+    };
+  }
+  return { canSuspend: true };
+}
+
+function checkBatchCanResume(batch) {
+  if (!batch.is_suspended) {
+    return {
+      canResume: false,
+      message: `批次 ${batch.id} 未处于挂起状态，无需恢复`
+    };
+  }
+  return { canResume: true };
+}
+
 module.exports = {
   schemas,
   validate,
@@ -499,8 +551,12 @@ module.exports = {
   checkReworkStatusTransition,
   checkReworkOverdue,
   checkReworkClosed,
+  checkBatchSuspended,
+  checkBatchCanSuspend,
+  checkBatchCanResume,
   VALID_STATUSES,
   VALID_OP_TYPES,
+  SUSPENDED_REASONS,
   EXCEPTION_TYPES,
   EXCEPTION_STATUSES,
   REWORK_SOURCE_TYPES,

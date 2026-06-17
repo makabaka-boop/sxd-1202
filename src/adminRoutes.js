@@ -16,7 +16,10 @@ const {
   checkReworkExists,
   checkBatchExistsForRework,
   checkReworkStatusTransition,
-  checkReworkClosed
+  checkReworkClosed,
+  checkBatchCanSuspend,
+  checkBatchCanResume,
+  checkVatConflictByStatus
 } = require('./validators');
 
 router.get('/batches', (req, res) => {
@@ -130,6 +133,100 @@ router.put('/batches/:id', validate(schemas.updateBatch), (req, res) => {
     }
 
     return updated;
+  });
+
+  try {
+    const batch = tx();
+    res.json(batch);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+router.post('/batches/:id/suspend', validate(schemas.suspendBatch), (req, res) => {
+  const tx = db.transaction(() => {
+    const id = parseInt(req.params.id);
+    const batch = batchRepo.getById(id);
+    if (!batch) {
+      throw new Error('批次不存在');
+    }
+
+    const canSuspend = checkBatchCanSuspend(batch);
+    if (!canSuspend.canSuspend) {
+      throw new Error(canSuspend.message);
+    }
+
+    const data = req.validated;
+
+    const now = new Date().toISOString();
+    const preSuspendedStatus = batch.status;
+
+    batchRepo.update(id, {
+      is_suspended: 1,
+      suspended_reason: data.suspended_reason,
+      suspended_by: data.suspended_by,
+      suspended_at: now,
+      expected_resume_at: data.expected_resume_at,
+      pre_suspended_status: preSuspendedStatus,
+      status: '已挂起'
+    });
+
+    vatRepo.setFree(batch.vat_no);
+
+    return batchRepo.getById(id);
+  });
+
+  try {
+    const batch = tx();
+    res.json(batch);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+router.post('/batches/:id/resume', validate(schemas.resumeBatch), (req, res) => {
+  const tx = db.transaction(() => {
+    const id = parseInt(req.params.id);
+    const batch = batchRepo.getById(id);
+    if (!batch) {
+      throw new Error('批次不存在');
+    }
+
+    const canResume = checkBatchCanResume(batch);
+    if (!canResume.canResume) {
+      throw new Error(canResume.message);
+    }
+
+    const targetStatus = batch.pre_suspended_status || batch.status;
+
+    if (['浸染中', '需补染', '待预洗'].includes(targetStatus)) {
+      const vatConflict = checkVatConflictByStatus(batch.vat_no, id);
+      if (vatConflict.conflict) {
+        throw new Error(`恢复失败：染缸 ${batch.vat_no} 当前已被占用（${vatConflict.message}），请更换染缸或等待染缸释放后重试`);
+      }
+      const vat = vatRepo.getByNo(batch.vat_no);
+      if (!vat) {
+        throw new Error(`染缸 ${batch.vat_no} 不存在，无法恢复到之前的状态`);
+      }
+    }
+
+    batchRepo.update(id, {
+      is_suspended: 0,
+      suspended_reason: null,
+      suspended_by: null,
+      suspended_at: null,
+      expected_resume_at: null,
+      pre_suspended_status: null,
+      status: targetStatus
+    });
+
+    const updatedBatch = batchRepo.getById(id);
+
+    if (['浸染中', '需补染', '待预洗'].includes(updatedBatch.status)) {
+      vatRepo.setOccupied(updatedBatch.vat_no, updatedBatch.id);
+    }
+
+    return updatedBatch;
   });
 
   try {

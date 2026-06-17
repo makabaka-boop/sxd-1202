@@ -15,7 +15,8 @@ const {
   autoGenerateExceptionFromWarning,
   checkReworkExists,
   checkReworkClosed,
-  checkBatchExistsForRework
+  checkBatchExistsForRework,
+  checkBatchSuspended
 } = require('./validators');
 
 router.post('/batches/:id/operations', validate(schemas.operation), (req, res) => {
@@ -24,6 +25,11 @@ router.post('/batches/:id/operations', validate(schemas.operation), (req, res) =
     const batch = batchRepo.getById(batchId);
     if (!batch) {
       throw new Error('批次不存在');
+    }
+
+    const suspendedCheck = checkBatchSuspended(batch);
+    if (suspendedCheck.suspended) {
+      throw new Error(suspendedCheck.message);
     }
 
     const data = req.validated;
@@ -169,6 +175,11 @@ function handleOperation(req, res) {
     const batch = batchRepo.getById(batchId);
     if (!batch) {
       throw new Error('批次不存在');
+    }
+
+    const suspendedCheck = checkBatchSuspended(batch);
+    if (suspendedCheck.suspended) {
+      throw new Error(suspendedCheck.message);
     }
 
     const data = req.body;
@@ -431,6 +442,11 @@ router.post('/batches/:id/reworks', validate(schemas.createRework), (req, res) =
     const batchCheck = checkBatchExistsForRework(batchId);
     if (!batchCheck.exists) {
       throw new Error(batchCheck.message);
+    }
+
+    const suspendedCheck = checkBatchSuspended(batchCheck.batch);
+    if (suspendedCheck.suspended) {
+      throw new Error(suspendedCheck.message);
     }
 
     if (data.batch_id !== batchId) {

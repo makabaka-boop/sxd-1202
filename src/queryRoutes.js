@@ -10,7 +10,8 @@ const {
   checkRedyeWithoutColor,
   checkMaterialHighFailure,
   autoGenerateExceptionFromWarning,
-  checkReworkOverdue
+  checkReworkOverdue,
+  checkBatchSuspended
 } = require('./validators');
 
 router.get('/batches', validateQuery(schemas.query), (req, res) => {
@@ -90,6 +91,17 @@ router.get('/batches/:id', (req, res) => {
         total: reworks.length,
         open_count: openReworks.length,
         overdue_count: overdueReworks.length
+      },
+      suspension: batch.is_suspended ? {
+        is_suspended: true,
+        suspended_reason: batch.suspended_reason,
+        suspended_by: batch.suspended_by,
+        suspended_at: batch.suspended_at,
+        expected_resume_at: batch.expected_resume_at,
+        pre_suspended_status: batch.pre_suspended_status,
+        is_overdue: batch.expected_resume_at && new Date(batch.expected_resume_at) < new Date()
+      } : {
+        is_suspended: false
       }
     });
   } catch (err) {
@@ -174,6 +186,9 @@ router.get('/stats/overview', (req, res) => {
     const highFailures = checkMaterialHighFailure();
     const exceptionOverview = exceptionRepo.getOverview();
     const reworkOverview = reworkRepo.getOverview();
+    const suspendedStats = statsRepo.getSuspendedStats();
+    const suspendedBatches = batchRepo.getSuspended();
+    const overdueSuspendedBatches = batchRepo.getOverdueSuspended();
 
     res.json({
       total_batches: allBatches.length,
@@ -199,7 +214,14 @@ router.get('/stats/overview', (req, res) => {
         }))
       },
       exception_disposal: exceptionOverview,
-      rework_disposal: reworkOverview
+      rework_disposal: reworkOverview,
+      suspension: {
+        suspended_count: suspendedStats.suspended_count,
+        overdue_suspended_count: suspendedStats.overdue_suspended_count,
+        by_reason: suspendedStats.by_reason,
+        suspended_batches: suspendedBatches,
+        overdue_suspended_batches: overdueSuspendedBatches
+      }
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -261,7 +283,23 @@ router.get('/reworks/:id', (req, res) => {
       warnings.push({ type: 'rework_overdue', ...rwOverdue });
     }
 
-    res.json({ ...rework, operations, warnings });
+    let batchSuspension = null;
+    if (rework.batch_id) {
+      const batch = batchRepo.getById(rework.batch_id);
+      if (batch && batch.is_suspended) {
+        batchSuspension = {
+          is_suspended: true,
+          suspended_reason: batch.suspended_reason,
+          suspended_by: batch.suspended_by,
+          suspended_at: batch.suspended_at,
+          expected_resume_at: batch.expected_resume_at,
+          pre_suspended_status: batch.pre_suspended_status,
+          is_overdue: batch.expected_resume_at && new Date(batch.expected_resume_at) < new Date()
+        };
+      }
+    }
+
+    res.json({ ...rework, operations, warnings, batch_suspension: batchSuspension || { is_suspended: false } });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -275,7 +313,24 @@ router.get('/exceptions/:id', (req, res) => {
       return res.status(404).json({ error: '异常处置单不存在' });
     }
     const reworks = reworkRepo.getByException(id);
-    res.json({ ...exception, reworks });
+
+    let batchSuspension = null;
+    if (exception.batch_id) {
+      const batch = batchRepo.getById(exception.batch_id);
+      if (batch && batch.is_suspended) {
+        batchSuspension = {
+          is_suspended: true,
+          suspended_reason: batch.suspended_reason,
+          suspended_by: batch.suspended_by,
+          suspended_at: batch.suspended_at,
+          expected_resume_at: batch.expected_resume_at,
+          pre_suspended_status: batch.pre_suspended_status,
+          is_overdue: batch.expected_resume_at && new Date(batch.expected_resume_at) < new Date()
+        };
+      }
+    }
+
+    res.json({ ...exception, reworks, batch_suspension: batchSuspension || { is_suspended: false } });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -320,6 +375,23 @@ router.get('/materials', (req, res) => {
   try {
     const materials = materialRepo.list();
     res.json(materials);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/stats/suspended-batches', (req, res) => {
+  try {
+    const suspended = batchRepo.getSuspended();
+    const overdueSuspended = batchRepo.getOverdueSuspended();
+    const suspendedStats = statsRepo.getSuspendedStats();
+    res.json({
+      suspended_count: suspendedStats.suspended_count,
+      overdue_suspended_count: suspendedStats.overdue_suspended_count,
+      by_reason: suspendedStats.by_reason,
+      suspended_batches: suspended,
+      overdue_suspended_batches: overdueSuspended
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
