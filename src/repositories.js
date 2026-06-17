@@ -1,6 +1,11 @@
 const db = require('./db');
 
 const ACTIVE_STATUSES = ['待预洗', '浸染中', '晾置中', '待复验', '需补染', '停留观察'];
+const RECHECK_WAITING_STATUSES = ['待复验', '停留观察'];
+
+function nullish(value, fallback = null) {
+  return value === undefined || value === null || value === '' ? fallback : value;
+}
 
 const batchRepo = {
   create(data) {
@@ -12,7 +17,7 @@ const batchRepo = {
     `);
     const result = stmt.run(
       data.cloth_no, data.vat_no, data.material, data.shade_target,
-      data.responsible_team, data.recheck_cycle || 24, now, now, data.remark || null
+      data.responsible_team, nullish(data.recheck_cycle, 24), now, now, nullish(data.remark)
     );
     return this.getById(result.lastInsertRowid);
   },
@@ -51,17 +56,28 @@ const batchRepo = {
     const where = [];
     const params = [];
 
-    if (filters.vat_no) { where.push('vat_no = ?'); params.push(filters.vat_no); }
-    if (filters.material) { where.push('material = ?'); params.push(filters.material); }
-    if (filters.shade_target) { where.push('shade_target = ?'); params.push(filters.shade_target); }
-    if (filters.status) { where.push('status = ?'); params.push(filters.status); }
-    if (filters.responsible_team) { where.push('responsible_team = ?'); params.push(filters.responsible_team); }
-    if (filters.start_date) { where.push('created_at >= ?'); params.push(filters.start_date); }
-    if (filters.end_date) { where.push('created_at <= ?'); params.push(filters.end_date); }
+    if (filters.vat_no) { where.push('b.vat_no = ?'); params.push(filters.vat_no); }
+    if (filters.material) { where.push('b.material = ?'); params.push(filters.material); }
+    if (filters.shade_target) { where.push('b.shade_target = ?'); params.push(filters.shade_target); }
+    if (filters.status) { where.push('b.status = ?'); params.push(filters.status); }
+    if (filters.responsible_team) { where.push('b.responsible_team = ?'); params.push(filters.responsible_team); }
+    if (filters.start_date) { where.push('b.created_at >= ?'); params.push(filters.start_date); }
+    if (filters.end_date) { where.push('b.created_at <= ?'); params.push(filters.end_date); }
 
-    let sql = 'SELECT * FROM batches';
+    if (filters.edge_halo_level !== undefined) {
+      const haloWhere = `o.edge_halo_level = ? AND o.id = (SELECT MAX(id) FROM operations WHERE batch_id = b.id AND edge_halo_level IS NOT NULL)`;
+      where.push(haloWhere);
+      params.push(filters.edge_halo_level);
+
+      let sql = `SELECT DISTINCT b.*, o.edge_halo_level FROM batches b INNER JOIN operations o ON o.batch_id = b.id`;
+      if (where.length) sql += ' WHERE ' + where.join(' AND ');
+      sql += ' ORDER BY b.updated_at DESC';
+      return db.prepare(sql).all(...params);
+    }
+
+    let sql = 'SELECT b.* FROM batches b';
     if (where.length) sql += ' WHERE ' + where.join(' AND ');
-    sql += ' ORDER BY created_at DESC';
+    sql += ' ORDER BY b.created_at DESC';
 
     return db.prepare(sql).all(...params);
   },
@@ -94,19 +110,90 @@ const batchRepo = {
   }
 };
 
+const vatOccupancyRepo = {
+  startOccupancy(vat_no, batch_id, startTime = null, remark = null) {
+    const t = startTime || new Date().toISOString();
+    const stmt = db.prepare(`
+      INSERT INTO vat_occupancy (vat_no, batch_id, start_time, end_time, remark)
+      VALUES (?, ?, ?, NULL, ?)
+    `);
+    return stmt.run(vat_no, batch_id, t, remark);
+  },
+
+  endOccupancy(vat_no, batch_id, endTime = null) {
+    const t = endTime || new Date().toISOString();
+    return db.prepare(`
+      UPDATE vat_occupancy SET end_time = ?
+      WHERE vat_no = ? AND batch_id = ? AND end_time IS NULL
+    `).run(t, vat_no, batch_id);
+  },
+
+  endAllForBatch(batch_id, endTime = null) {
+    const t = endTime || new Date().toISOString();
+    return db.prepare(`
+      UPDATE vat_occupancy SET end_time = ?
+      WHERE batch_id = ? AND end_time IS NULL
+    `).run(t, batch_id);
+  },
+
+  checkConflict(vat_no, startTime, endTime = null, excludeBatchId = null) {
+    const end = endTime || '9999-12-31T23:59:59.999Z';
+    let sql = `
+      SELECT vo.*, b.cloth_no, b.status
+      FROM vat_occupancy vo
+      JOIN batches b ON b.id = vo.batch_id
+      WHERE vo.vat_no = ?
+      AND vo.start_time < ?
+      AND COALESCE(vo.end_time, '9999-12-31T23:59:59.999Z') > ?
+    `;
+    const params = [vat_no, end, startTime];
+    if (excludeBatchId) {
+      sql += ' AND vo.batch_id != ?';
+      params.push(excludeBatchId);
+    }
+    return db.prepare(sql).all(...params);
+  },
+
+  getActiveOccupancy(vat_no) {
+    return db.prepare(`
+      SELECT vo.*, b.cloth_no, b.status
+      FROM vat_occupancy vo
+      JOIN batches b ON b.id = vo.batch_id
+      WHERE vo.vat_no = ? AND vo.end_time IS NULL
+      ORDER BY vo.start_time DESC LIMIT 1
+    `).get(vat_no);
+  },
+
+  listByVat(vat_no) {
+    return db.prepare(`
+      SELECT vo.*, b.cloth_no, b.status
+      FROM vat_occupancy vo
+      JOIN batches b ON b.id = vo.batch_id
+      WHERE vo.vat_no = ?
+      ORDER BY vo.start_time DESC
+    `).all(vat_no);
+  }
+};
+
 const operationRepo = {
   create(data) {
-    const now = data.op_time || new Date().toISOString();
+    const now = nullish(data.op_time, new Date().toISOString());
     const stmt = db.prepare(`
       INSERT INTO operations
       (batch_id, op_type, op_time, operator, color_diff_desc, edge_halo_level, redye_suggestion, temperature, duration_minutes, remark)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const result = stmt.run(
-      data.batch_id, data.op_type, now, data.operator || null,
-      data.color_diff_desc || null, data.edge_halo_level || null,
-      data.redye_suggestion || null, data.temperature || null,
-      data.duration_minutes || null, data.remark || null
+      data.batch_id,
+      data.op_type,
+      now,
+      nullish(data.operator),
+      nullish(data.color_diff_desc),
+      data.edge_halo_level ?? null,
+      nullish(data.redye_suggestion),
+      data.temperature ?? null,
+      data.duration_minutes ?? null,
+      nullish(data.remark)
     );
     return this.getById(result.lastInsertRowid);
   },
@@ -151,7 +238,7 @@ const vatRepo = {
       INSERT INTO vats (vat_no, vat_name, capacity, status, created_at, updated_at)
       VALUES (?, ?, ?, '空闲', ?, ?)
     `);
-    const result = stmt.run(data.vat_no, data.vat_name || null, data.capacity || null, now, now);
+    const result = stmt.run(data.vat_no, nullish(data.vat_name), data.capacity ?? null, now, now);
     return this.getById(result.lastInsertRowid);
   },
 
@@ -191,12 +278,18 @@ const vatRepo = {
 
   setOccupied(vat_no, batch_id) {
     const now = new Date().toISOString();
+    vatOccupancyRepo.endOccupancy(vat_no, batch_id, now);
+    vatOccupancyRepo.startOccupancy(vat_no, batch_id, now);
     return db.prepare('UPDATE vats SET status = ?, current_batch_id = ?, updated_at = ? WHERE vat_no = ?')
       .run('使用中', batch_id, now, vat_no);
   },
 
   setFree(vat_no) {
     const now = new Date().toISOString();
+    const vat = this.getByNo(vat_no);
+    if (vat && vat.current_batch_id) {
+      vatOccupancyRepo.endOccupancy(vat_no, vat.current_batch_id, now);
+    }
     return db.prepare('UPDATE vats SET status = ?, current_batch_id = NULL, updated_at = ? WHERE vat_no = ?')
       .run('空闲', now, vat_no);
   }
@@ -206,7 +299,7 @@ const materialRepo = {
   create(data) {
     const now = new Date().toISOString();
     const stmt = db.prepare('INSERT INTO materials (material_name, material_desc, created_at) VALUES (?, ?, ?)');
-    const result = stmt.run(data.material_name, data.material_desc || null, now);
+    const result = stmt.run(data.material_name, nullish(data.material_desc), now);
     return this.getById(result.lastInsertRowid);
   },
 
@@ -273,22 +366,23 @@ const materialRepo = {
 const statsRepo = {
   getOverdueRechecks() {
     const now = new Date().toISOString();
+    const placeholders = RECHECK_WAITING_STATUSES.map(() => '?').join(',');
     return db.prepare(`
       SELECT * FROM batches
-      WHERE status IN ('待复验', '停留观察')
+      WHERE status IN (${placeholders})
       AND next_recheck_at IS NOT NULL
       AND next_recheck_at < ?
       ORDER BY next_recheck_at ASC
-    `).all(now);
+    `).all(...RECHECK_WAITING_STATUSES, now);
   },
 
   getPendingRechecks() {
-    const now = new Date().toISOString();
+    const placeholders = RECHECK_WAITING_STATUSES.map(() => '?').join(',');
     return db.prepare(`
       SELECT * FROM batches
-      WHERE status = '待复验'
+      WHERE status IN (${placeholders})
       ORDER BY COALESCE(next_recheck_at, updated_at) ASC
-    `).all();
+    `).all(...RECHECK_WAITING_STATUSES);
   },
 
   getColorDeviationBatches() {
@@ -344,5 +438,8 @@ module.exports = {
   vatRepo,
   materialRepo,
   statsRepo,
-  ACTIVE_STATUSES
+  vatOccupancyRepo,
+  ACTIVE_STATUSES,
+  RECHECK_WAITING_STATUSES,
+  nullish
 };

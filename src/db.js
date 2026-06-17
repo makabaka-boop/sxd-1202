@@ -53,6 +53,16 @@ function initDatabase() {
       FOREIGN KEY (current_batch_id) REFERENCES batches(id)
     );
 
+    CREATE TABLE IF NOT EXISTS vat_occupancy (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      vat_no TEXT NOT NULL,
+      batch_id INTEGER NOT NULL,
+      start_time TEXT NOT NULL,
+      end_time TEXT,
+      remark TEXT,
+      FOREIGN KEY (batch_id) REFERENCES batches(id) ON DELETE CASCADE
+    );
+
     CREATE TABLE IF NOT EXISTS materials (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       material_name TEXT NOT NULL UNIQUE,
@@ -69,6 +79,8 @@ function initDatabase() {
     CREATE INDEX IF NOT EXISTS idx_operations_batch ON operations(batch_id);
     CREATE INDEX IF NOT EXISTS idx_operations_type ON operations(op_type);
     CREATE INDEX IF NOT EXISTS idx_operations_time ON operations(op_time);
+    CREATE INDEX IF NOT EXISTS idx_vat_occ_vat ON vat_occupancy(vat_no);
+    CREATE INDEX IF NOT EXISTS idx_vat_occ_time ON vat_occupancy(start_time, end_time);
   `);
 
   const now = new Date().toISOString();

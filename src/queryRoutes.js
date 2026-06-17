@@ -13,12 +13,6 @@ const {
 router.get('/batches', validateQuery(schemas.query), (req, res) => {
   try {
     const filters = req.validatedQuery || {};
-
-    if (filters.edge_halo_level !== undefined) {
-      const batches = batchRepo.listByHaloLevel(filters.edge_halo_level);
-      return res.json(batches);
-    }
-
     const batches = batchRepo.list(filters);
     res.json(batches);
   } catch (err) {

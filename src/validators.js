@@ -1,5 +1,5 @@
 const Joi = require('joi');
-const { batchRepo, operationRepo, vatRepo, materialRepo } = require('./repositories');
+const { batchRepo, operationRepo, vatRepo, materialRepo, vatOccupancyRepo } = require('./repositories');
 
 const VALID_STATUSES = ['待预洗', '浸染中', '晾置中', '待复验', '需补染', '通过', '停留观察'];
 const VALID_OP_TYPES = ['预洗', '浸染', '晾置', '固色', '复验', '补染', '色差登记', '其他'];
@@ -89,7 +89,27 @@ function validateQuery(schema) {
   };
 }
 
-function checkVatConflict(vat_no, excludeBatchId = null) {
+function checkVatConflict(vat_no, excludeBatchId = null, startTime = null, durationMinutes = null) {
+  const t = startTime || new Date().toISOString();
+  let endTime = null;
+  if (durationMinutes) {
+    endTime = new Date(new Date(t).getTime() + durationMinutes * 60 * 1000).toISOString();
+  }
+
+  const conflicts = vatOccupancyRepo.checkConflict(vat_no, t, endTime, excludeBatchId);
+
+  if (conflicts.length > 0) {
+    const c = conflicts[0];
+    return {
+      conflict: true,
+      message: `染缸 ${vat_no} 在 ${c.start_time} ~ ${c.end_time || '至今'} 已被批次 ${c.cloth_no} 占用（状态：${c.status}）`,
+      conflicts
+    };
+  }
+  return { conflict: false };
+}
+
+function checkVatConflictByStatus(vat_no, excludeBatchId = null) {
   const conflict = batchRepo.getActiveByVat(vat_no, excludeBatchId);
   if (conflict) {
     return {
@@ -151,7 +171,6 @@ function checkStatusTransition(currentStatus, targetStatus, opType) {
 }
 
 function checkRedyeWithoutColor(batch_id) {
-  const lastRedye = operationRepo.create.length > 0 ? null : null;
   const allOps = operationRepo.listByBatch(batch_id);
   const redyeOps = allOps.filter(o => o.op_type === '补染').sort((a, b) => new Date(b.op_time) - new Date(a.op_time));
 
@@ -228,6 +247,7 @@ module.exports = {
   validate,
   validateQuery,
   checkVatConflict,
+  checkVatConflictByStatus,
   checkStatusTransition,
   checkRedyeWithoutColor,
   checkRecheckOverdue,

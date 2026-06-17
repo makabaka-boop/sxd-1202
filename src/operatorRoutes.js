@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('./db');
-const { batchRepo, operationRepo, vatRepo } = require('./repositories');
+const { batchRepo, operationRepo, vatRepo, vatOccupancyRepo } = require('./repositories');
 const {
   schemas,
   validate,
@@ -9,6 +9,7 @@ const {
   checkRecheckOverdue,
   checkContinuousColorDeviation,
   checkRedyeWithoutColor,
+  checkVatConflict,
   computeNextRecheck
 } = require('./validators');
 
@@ -25,6 +26,14 @@ router.post('/batches/:id/operations', validate(schemas.operation), (req, res) =
     const transition = checkStatusTransition(batch.status, null, data.op_type);
     if (!transition.valid) {
       throw new Error(transition.message);
+    }
+
+    if (['浸染', '补染', '预洗'].includes(data.op_type)) {
+      const opTime = data.op_time || new Date().toISOString();
+      const conflict = checkVatConflict(batch.vat_no, batchId, opTime, data.duration_minutes);
+      if (conflict.conflict) {
+        throw new Error(conflict.message);
+      }
     }
 
     const operationData = {
@@ -68,8 +77,7 @@ router.post('/batches/:id/operations', validate(schemas.operation), (req, res) =
     }
 
     if (data.color_diff_desc || data.edge_halo_level !== undefined || data.redye_suggestion) {
-      // 色差登记本身不改变状态，但如果有补染建议，标记状态
-      if (data.redye_suggestion && data.redye_suggestion.trim() !== '') {
+      if (data.redye_suggestion && String(data.redye_suggestion).trim() !== '') {
         updates.status = '需补染';
       }
     }
@@ -99,11 +107,7 @@ router.post('/batches/:id/operations', validate(schemas.operation), (req, res) =
 
 router.post('/batches/:id/prewash', (req, res) => {
   req.body = { ...req.body, op_type: '预洗' };
-  const handler = router.stack.find(l => l.route && l.route.path === '/batches/:id/operations');
-  res.redirect ? null : null;
-  req.url = `/api/operator/batches/${req.params.id}/operations`;
-  req.method = 'POST';
-  router.handle(req, res, () => {});
+  handleOperation(req, res);
 });
 
 router.post('/batches/:id/dip', (req, res) => {
@@ -147,7 +151,7 @@ function handleOperation(req, res) {
     const data = req.body;
     const opType = data.op_type;
 
-    const { error, value } = schemas.operation.validate(data, { abortEarly: false });
+    const { error, value } = schemas.operation.validate(data, { abortEarly: false, convert: true });
     if (error) {
       throw new Error('参数校验失败: ' + error.details.map(d => d.message).join('; '));
     }
@@ -155,6 +159,14 @@ function handleOperation(req, res) {
     const transition = checkStatusTransition(batch.status, null, opType);
     if (!transition.valid) {
       throw new Error(transition.message);
+    }
+
+    if (['浸染', '补染', '预洗'].includes(opType)) {
+      const opTime = value.op_time || new Date().toISOString();
+      const conflict = checkVatConflict(batch.vat_no, batchId, opTime, value.duration_minutes);
+      if (conflict.conflict) {
+        throw new Error(conflict.message);
+      }
     }
 
     const operationData = {
@@ -196,7 +208,7 @@ function handleOperation(req, res) {
         });
         break;
       case '色差登记':
-        if (value.redye_suggestion && value.redye_suggestion.trim() !== '') {
+        if (value.redye_suggestion && String(value.redye_suggestion).trim() !== '') {
           updates.status = '需补染';
         }
         break;
@@ -277,6 +289,17 @@ router.get('/batches/:id/operations', (req, res) => {
     }
     const operations = operationRepo.listByBatch(batchId);
     res.json(operations);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/vats/:vat_no/occupancy', (req, res) => {
+  try {
+    const vat_no = req.params.vat_no;
+    const list = vatOccupancyRepo.listByVat(vat_no);
+    const active = vatOccupancyRepo.getActiveOccupancy(vat_no);
+    res.json({ vat_no, active, history: list });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
